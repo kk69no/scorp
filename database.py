@@ -89,6 +89,43 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);
             CREATE INDEX IF NOT EXISTS idx_users_tg ON users(telegram_id);
             CREATE INDEX IF NOT EXISTS idx_users_ref ON users(referral_code);
+
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                code            TEXT UNIQUE NOT NULL,
+                discount_percent INTEGER DEFAULT 0,
+                discount_amount INTEGER DEFAULT 0,
+                max_uses        INTEGER DEFAULT 0,
+                used_count      INTEGER DEFAULT 0,
+                valid_to        TEXT,
+                created_by      INTEGER,
+                is_active       INTEGER DEFAULT 1,
+                created_at      TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_telegram_id INTEGER NOT NULL,
+                action          TEXT NOT NULL,
+                details         TEXT,
+                created_at      TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS user_notes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL REFERENCES users(id),
+                admin_telegram_id INTEGER NOT NULL,
+                note            TEXT NOT NULL,
+                created_at      TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS consoles (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT UNIQUE NOT NULL,
+                status          TEXT DEFAULT 'active',
+                note            TEXT DEFAULT '',
+                updated_at      TEXT DEFAULT (datetime('now', 'localtime'))
+            );
         """)
         await db.commit()
     finally:
@@ -934,5 +971,281 @@ async def export_bookings_csv(days: int = 30) -> str:
                 r["status"], r["admin_note"] or "", r["full_name"], r["phone"] or ""
             ])
         return output.getvalue()
+    finally:
+        await db.close()
+
+
+# ─── Promo codes ─────────────────────────────────────────
+
+async def create_promo_code(code: str, discount_percent: int = 0, discount_amount: int = 0,
+                            max_uses: int = 0, valid_to: str = "", created_by: int = 0) -> int:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """INSERT INTO promo_codes (code, discount_percent, discount_amount, max_uses, valid_to, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (code.upper(), discount_percent, discount_amount, max_uses, valid_to, created_by),
+        )
+        await db.commit()
+        return cur.lastrowid
+    finally:
+        await db.close()
+
+
+async def get_promo_code(code: str) -> Optional[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM promo_codes WHERE code = ?", (code.upper(),))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def get_all_promo_codes() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM promo_codes ORDER BY created_at DESC")
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def use_promo_code(code: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """UPDATE promo_codes SET used_count = used_count + 1
+               WHERE code = ? AND is_active = 1
+               AND (max_uses = 0 OR used_count < max_uses)""",
+            (code.upper(),),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def delete_promo_code(code: str) -> bool:
+    db = await get_db()
+    try:
+        cur = await db.execute("DELETE FROM promo_codes WHERE code = ?", (code.upper(),))
+        await db.commit()
+        return cur.rowcount > 0
+    finally:
+        await db.close()
+
+
+async def validate_promo_code(code: str) -> Optional[dict]:
+    promo = await get_promo_code(code)
+    if not promo or not promo["is_active"]:
+        return None
+    if promo["max_uses"] > 0 and promo["used_count"] >= promo["max_uses"]:
+        return None
+    if promo["valid_to"]:
+        from datetime import date as _d
+        if promo["valid_to"] < _d.today().isoformat():
+            return None
+    return promo
+
+
+# ─── Admin logs ──────────────────────────────────────────
+
+async def add_admin_log(admin_tg_id: int, action: str, details: str = "") -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO admin_logs (admin_telegram_id, action, details) VALUES (?, ?, ?)",
+            (admin_tg_id, action, details),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_admin_logs(limit: int = 50) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT al.*, u.full_name
+               FROM admin_logs al
+               LEFT JOIN users u ON al.admin_telegram_id = u.telegram_id
+               ORDER BY al.created_at DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+# ─── User notes ──────────────────────────────────────────
+
+async def add_user_note(user_id: int, admin_tg_id: int, note: str) -> int:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "INSERT INTO user_notes (user_id, admin_telegram_id, note) VALUES (?, ?, ?)",
+            (user_id, admin_tg_id, note),
+        )
+        await db.commit()
+        return cur.lastrowid
+    finally:
+        await db.close()
+
+
+async def get_user_notes(user_id: int, limit: int = 10) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT un.*, u.full_name as admin_name
+               FROM user_notes un
+               LEFT JOIN users u ON un.admin_telegram_id = u.telegram_id
+               WHERE un.user_id = ?
+               ORDER BY un.created_at DESC LIMIT ?""",
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+# ─── Consoles ────────────────────────────────────────────
+
+async def get_consoles() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM consoles ORDER BY name")
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def update_console_status(name: str, status: str, note: str = "") -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO consoles (name, status, note, updated_at)
+               VALUES (?, ?, ?, datetime('now', 'localtime'))
+               ON CONFLICT(name) DO UPDATE SET status = ?, note = ?, updated_at = datetime('now', 'localtime')""",
+            (name, status, note, status, note),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def init_consoles(console_names: list[str]) -> None:
+    db = await get_db()
+    try:
+        for name in console_names:
+            await db.execute("INSERT OR IGNORE INTO consoles (name) VALUES (?)", (name,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+# ─── Enhanced reporting ──────────────────────────────────
+
+async def get_top_customers(limit: int = 10) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT u.*, COUNT(b.id) as booking_count,
+                      COALESCE(SUM(b.total_price), 0) as total_spent
+               FROM users u
+               LEFT JOIN bookings b ON u.id = b.user_id AND b.status = 'completed'
+               WHERE u.is_blacklisted = 0
+               GROUP BY u.id
+               ORDER BY total_spent DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_monthly_report(year: int, month: int) -> dict:
+    db = await get_db()
+    try:
+        month_str = f"{year}-{month:02d}"
+        report = {}
+
+        cur = await db.execute(
+            """SELECT COUNT(*) as c, COALESCE(SUM(total_price), 0) as rev,
+                      COALESCE(SUM(guests_count), 0) as guests,
+                      COALESCE(SUM(duration_hours), 0) as hours
+               FROM bookings
+               WHERE status = 'completed' AND booking_date LIKE ? || '%'""",
+            (month_str,),
+        )
+        row = await cur.fetchone()
+        report["bookings"] = row["c"]
+        report["revenue"] = row["rev"]
+        report["guests"] = row["guests"]
+        report["hours"] = row["hours"]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) as c FROM bookings WHERE status = 'cancelled' AND booking_date LIKE ? || '%'",
+            (month_str,),
+        )
+        report["cancellations"] = (await cur.fetchone())["c"]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) as c FROM bookings WHERE status = 'no_show' AND booking_date LIKE ? || '%'",
+            (month_str,),
+        )
+        report["noshows"] = (await cur.fetchone())["c"]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) as c FROM users WHERE created_at LIKE ? || '%'",
+            (month_str,),
+        )
+        report["new_users"] = (await cur.fetchone())["c"]
+
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(extras_price), 0) as e FROM bookings WHERE status = 'completed' AND booking_date LIKE ? || '%'",
+            (month_str,),
+        )
+        report["extras_revenue"] = (await cur.fetchone())["e"]
+
+        return report
+    finally:
+        await db.close()
+
+
+async def get_inactive_users(days: int = 30) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT u.* FROM users u
+               WHERE u.is_blacklisted = 0
+                 AND u.id NOT IN (
+                     SELECT DISTINCT user_id FROM bookings
+                     WHERE booking_date >= date('now', 'localtime', ? || ' days')
+                       AND status IN ('confirmed', 'completed')
+                 )
+               ORDER BY u.created_at""",
+            (f"-{days}",),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_vip_users(min_visits: int = 5) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM users WHERE visits_count >= ? AND is_blacklisted = 0 ORDER BY visits_count DESC",
+            (min_visits,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
     finally:
         await db.close()

@@ -303,13 +303,17 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Загрузка", callback_data="adm:occupancy"),
          InlineKeyboardButton(text="📈 Статистика", callback_data="adm:stats")],
         [InlineKeyboardButton(text="📝 Ручная бронь", callback_data="adm:manual_booking")],
-        [InlineKeyboardButton(text="📅 Управление датами", callback_data="adm:dates")],
+        [InlineKeyboardButton(text="📅 Даты", callback_data="adm:dates"),
+         InlineKeyboardButton(text="🎮 Консоли", callback_data="adm:consoles")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="adm:users")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:promo")],
+        [InlineKeyboardButton(text="🎫 Промокоды", callback_data="adm:promo_codes")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:promo"),
+         InlineKeyboardButton(text="🎯 Целевая", callback_data="adm:targeted_promo")],
         [InlineKeyboardButton(text="✅ Завершить", callback_data="adm:complete"),
          InlineKeyboardButton(text="🚷 Неявка", callback_data="adm:noshow")],
         [InlineKeyboardButton(text="📤 Экспорт", callback_data="adm:export"),
          InlineKeyboardButton(text="⚙️ Настройки", callback_data="adm:settings")],
+        [InlineKeyboardButton(text="📜 Журнал", callback_data="adm:logs")],
     ])
 
 

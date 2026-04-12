@@ -506,6 +506,8 @@ async def adm_stats(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Загрузка по часам", callback_data="adm:occupancy")],
         [InlineKeyboardButton(text="💰 Выручка по дням", callback_data="adm:revenue")],
+        [InlineKeyboardButton(text="📊 Месячный отчёт", callback_data="adm:monthly")],
+        [InlineKeyboardButton(text="🏆 Топ клиентов", callback_data="adm:top_customers")],
         [InlineKeyboardButton(text="⭐ Все отзывы", callback_data="adm:reviews")],
         [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
     ])
@@ -682,9 +684,17 @@ async def adm_user_profile(callback: CallbackQuery):
             text += f"  #{b['id']} {b['booking_date']} {b['start_time']} — {STATUS_TEXT.get(b['status'], b['status'])}\n"
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    # User notes
+    notes = await db.get_user_notes(user["id"], limit=3)
+    if notes:
+        text += "\n📝 Заметки:\n"
+        for n in notes:
+            text += f"  {n['created_at'][:10]}: {n['note']}\n"
+
     buttons = [
-        [InlineKeyboardButton(text="💎 Изменить баллы", callback_data=f"adm_points:{tg_id}")],
-        [InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"adm_msg:{tg_id}")],
+        [InlineKeyboardButton(text="💎 Баллы", callback_data=f"adm_points:{tg_id}"),
+         InlineKeyboardButton(text="📝 Заметка", callback_data=f"adm_note:{tg_id}")],
+        [InlineKeyboardButton(text="💬 Написать", callback_data=f"adm_msg:{tg_id}")],
     ]
     if user["is_blacklisted"]:
         buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"adm_unban:{tg_id}")])
@@ -1178,6 +1188,7 @@ async def adm_view_booking(callback: CallbackQuery):
             InlineKeyboardButton(text="🚷 Неявка", callback_data=f"adm_noshow:{booking_id}"),
         ])
         buttons.append([
+            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"adm_edit:{booking_id}"),
             InlineKeyboardButton(text="❌ Отменить", callback_data=f"adm_cancel:{booking_id}"),
         ])
     if user:
@@ -1226,12 +1237,655 @@ async def adm_settings(callback: CallbackQuery):
         f"⏳ Мин. бронь: {MIN_BOOKING_HOURS} ч.\n"
         f"📍 Адрес: {VENUE_ADDRESS}\n"
         f"📱 Телефон: {VENUE_PHONE}\n\n"
-        f"⚠️ Для изменения настроек напиши администратору системы."
+        f"Нажми кнопку чтобы изменить настройку:"
     )
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Цена/час", callback_data="adm_set:price"),
+         InlineKeyboardButton(text="🌟 Сутки", callback_data="adm_set:fullday")],
+        [InlineKeyboardButton(text="⏰ Открытие", callback_data="adm_set:hours_start"),
+         InlineKeyboardButton(text="⏰ Закрытие", callback_data="adm_set:hours_end")],
+        [InlineKeyboardButton(text="👥 Макс. гостей", callback_data="adm_set:capacity")],
         [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  EDIT BOOKING
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("adm_edit:"))
+async def adm_edit_booking(callback: CallbackQuery):
+    booking_id = int(callback.data.split(":")[1])
+    booking = await db.get_booking(booking_id)
+    if not booking:
+        await callback.answer("Не найдена", show_alert=True)
+        return
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Дату", callback_data=f"adm_editf:date:{booking_id}"),
+         InlineKeyboardButton(text="⏰ Время", callback_data=f"adm_editf:time:{booking_id}")],
+        [InlineKeyboardButton(text="⏳ Длительность", callback_data=f"adm_editf:duration:{booking_id}"),
+         InlineKeyboardButton(text="👥 Гостей", callback_data=f"adm_editf:guests:{booking_id}")],
+        [InlineKeyboardButton(text="📝 Заметку", callback_data=f"adm_editf:note:{booking_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_view:{booking_id}")],
+    ])
+
+    await callback.message.edit_text(
+        f"✏️ Редактирование брони #{booking_id}\n\n"
+        f"📅 {booking['booking_date']} {booking['start_time']}–{booking['end_time']}\n"
+        f"👥 {booking['guests_count']} чел. | {booking['duration_hours']}ч | {booking['total_price']:,}₽\n\n"
+        "Что изменить?",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_editf:"))
+async def adm_edit_field(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    field = parts[1]
+    booking_id = int(parts[2])
+
+    await state.update_data(edit_booking_id=booking_id, edit_field=field)
+
+    prompts = {
+        "date": "📅 Введи новую дату (YYYY-MM-DD):",
+        "time": "⏰ Введи новое время начала (HH:MM):",
+        "duration": "⏳ Введи новую длительность (часы):",
+        "guests": f"👥 Введи кол-во гостей (1-{MAX_CAPACITY}):",
+        "note": "📝 Введи заметку:",
+    }
+
+    await callback.message.edit_text(prompts.get(field, "Введи значение:"))
+    await state.set_state(AdminStates.edit_new_value)
+    await callback.answer()
+
+
+@router.message(AdminStates.edit_new_value)
+async def adm_edit_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    booking_id = data["edit_booking_id"]
+    field = data["edit_field"]
+    value = message.text.strip()
+
+    try:
+        if field == "date":
+            from datetime import datetime as dt
+            dt.strptime(value, "%Y-%m-%d")
+            await db.update_booking_fields(booking_id, booking_date=value)
+        elif field == "time":
+            h, m = value.split(":")
+            int(h); int(m)
+            booking = await db.get_booking(booking_id)
+            end_h = int(h) + booking["duration_hours"]
+            end_time = f"{end_h % 24:02d}:00"
+            await db.update_booking_fields(booking_id, start_time=value, end_time=end_time)
+        elif field == "duration":
+            dur = int(value)
+            booking = await db.get_booking(booking_id)
+            start_h = int(booking["start_time"].split(":")[0])
+            end_time = f"{(start_h + dur) % 24:02d}:00"
+            new_price = PRICE_PER_HOUR * dur
+            await db.update_booking_fields(
+                booking_id, duration_hours=dur, end_time=end_time,
+                base_price=new_price,
+                total_price=new_price + booking["extras_price"] - booking["discount"],
+            )
+        elif field == "guests":
+            guests = int(value)
+            if guests < 1 or guests > MAX_CAPACITY:
+                raise ValueError
+            await db.update_booking_fields(booking_id, guests_count=guests)
+        elif field == "note":
+            await db.update_booking_fields(booking_id, admin_note=value)
+        else:
+            await message.answer("❌ Неизвестное поле", reply_markup=admin_menu_kb())
+            await state.clear()
+            return
+
+        await db.add_admin_log(message.from_user.id, "edit_booking",
+                               f"Бронь #{booking_id}: {field} = {value}")
+        await state.clear()
+        await message.answer(
+            f"✅ Бронь #{booking_id}: {field} → {value}",
+            reply_markup=admin_menu_kb(),
+        )
+    except (ValueError, TypeError):
+        await message.answer("❌ Неверный формат. Попробуй снова:")
+
+
+# ═══════════════════════════════════════════════════════════
+#  PROMO CODES
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:promo_codes")
+async def adm_promo_codes(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    codes = await db.get_all_promo_codes()
+
+    text = f"🎫 Промокоды ({len(codes)})\n{'─' * 28}\n\n"
+
+    if codes:
+        for c in codes:
+            status = "✅" if c["is_active"] else "❌"
+            disc = f"-{c['discount_percent']}%" if c["discount_percent"] else f"-{c['discount_amount']}₽"
+            uses = f"{c['used_count']}/{c['max_uses']}" if c["max_uses"] else f"{c['used_count']}/∞"
+            valid = f" до {c['valid_to']}" if c.get("valid_to") else ""
+            text += f"  {status} {c['code']} | {disc} | {uses}{valid}\n"
+    else:
+        text += "Нет промокодов"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for c in codes[:8]:
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 {c['code']}",
+            callback_data=f"adm_del_promo:{c['code']}"
+        )])
+    rows.append([InlineKeyboardButton(text="➕ Создать промокод", callback_data="adm:create_promo")])
+    rows.append([InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:create_promo")
+async def adm_create_promo(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🎫 Создание промокода\n\nВведи код (буквы/цифры, мин. 3 символа):"
+    )
+    await state.set_state(AdminStates.creating_promo_code)
+    await callback.answer()
+
+
+@router.message(AdminStates.creating_promo_code)
+async def adm_promo_code_name(message: Message, state: FSMContext):
+    code = message.text.strip().upper()
+    if not code.isalnum() or len(code) < 3:
+        await message.answer("Код должен быть от 3 символов (буквы/цифры):")
+        return
+
+    existing = await db.get_promo_code(code)
+    if existing:
+        await message.answer("Этот код уже существует. Введи другой:")
+        return
+
+    await state.update_data(promo_code=code)
+    await message.answer(
+        f"Код: {code}\n\nВведи скидку — процент (напр. 10%) или сумму (напр. 500):"
+    )
+    await state.set_state(AdminStates.promo_discount)
+
+
+@router.message(AdminStates.promo_discount)
+async def adm_promo_discount(message: Message, state: FSMContext):
+    text = message.text.strip()
+    discount_percent = 0
+    discount_amount = 0
+
+    if "%" in text:
+        try:
+            discount_percent = int(text.replace("%", "").strip())
+            if discount_percent < 1 or discount_percent > 100:
+                raise ValueError
+        except ValueError:
+            await message.answer("Введи процент 1-100 (напр. 15%):")
+            return
+    else:
+        try:
+            discount_amount = int(text.replace("₽", "").replace("р", "").strip())
+            if discount_amount < 1:
+                raise ValueError
+        except ValueError:
+            await message.answer("Введи сумму (напр. 500) или процент (напр. 10%):")
+            return
+
+    await state.update_data(promo_percent=discount_percent, promo_amount=discount_amount)
+    await message.answer("Макс. использований (0 = безлимит):")
+    await state.set_state(AdminStates.promo_max_uses)
+
+
+@router.message(AdminStates.promo_max_uses)
+async def adm_promo_max_uses(message: Message, state: FSMContext):
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи число (0 = безлимит):")
+        return
+
+    data = await state.get_data()
+    code = data["promo_code"]
+
+    await db.create_promo_code(
+        code=code,
+        discount_percent=data["promo_percent"],
+        discount_amount=data["promo_amount"],
+        max_uses=max_uses,
+        created_by=message.from_user.id,
+    )
+    await db.add_admin_log(message.from_user.id, "create_promo", f"Промокод {code}")
+    await state.clear()
+
+    disc = f"-{data['promo_percent']}%" if data["promo_percent"] else f"-{data['promo_amount']}₽"
+    uses = f"макс. {max_uses}" if max_uses else "безлимит"
+    await message.answer(
+        f"✅ Промокод создан!\n\n🎫 {code}\n💰 {disc}\n🔢 {uses}",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("adm_del_promo:"))
+async def adm_delete_promo(callback: CallbackQuery):
+    code = callback.data.split(":", 1)[1]
+    await db.delete_promo_code(code)
+    await db.add_admin_log(callback.from_user.id, "delete_promo", f"Удалён {code}")
+    await callback.answer(f"🗑 {code} удалён", show_alert=True)
+    await adm_promo_codes(callback)
+
+
+# ═══════════════════════════════════════════════════════════
+#  ADMIN LOGS
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:logs")
+async def adm_logs(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    logs = await db.get_admin_logs(30)
+    text = f"📜 Журнал действий\n{'─' * 28}\n\n"
+
+    if logs:
+        for log in logs:
+            name = log.get("full_name") or str(log["admin_telegram_id"])
+            time_str = log["created_at"][5:16]
+            text += f"  {time_str} | {name}\n  → {log['action']}: {log.get('details', '')}\n\n"
+    else:
+        text += "Пока нет записей"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  CONSOLE MANAGEMENT
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:consoles")
+async def adm_consoles(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    from config import CONSOLES
+    await db.init_consoles(CONSOLES)
+    consoles = await db.get_consoles()
+
+    status_icons = {"active": "🟢", "maintenance": "🟡", "broken": "🔴"}
+    text = f"🎮 Консоли\n{'─' * 28}\n\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for c in consoles:
+        icon = status_icons.get(c["status"], "⚪")
+        note = f" — {c['note']}" if c.get("note") else ""
+        text += f"  {icon} {c['name']}: {c['status']}{note}\n"
+        rows.append([
+            InlineKeyboardButton(text=f"🟢", callback_data=f"adm_con:active:{c['name']}"),
+            InlineKeyboardButton(text=f"🟡", callback_data=f"adm_con:maintenance:{c['name']}"),
+            InlineKeyboardButton(text=f"🔴", callback_data=f"adm_con:broken:{c['name']}"),
+            InlineKeyboardButton(text=c["name"], callback_data="ignore"),
+        ])
+
+    rows.append([InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_con:"))
+async def adm_console_status(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":", 2)
+    new_status = parts[1]
+    console_name = parts[2]
+
+    if new_status == "broken":
+        await state.update_data(console_name=console_name, console_status=new_status)
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Без описания", callback_data="console_no_note")]
+        ])
+        await callback.message.edit_text(
+            f"🔴 {console_name} → поломка\n\nОпиши проблему:",
+            reply_markup=kb,
+        )
+        await state.set_state(AdminStates.console_note)
+        await callback.answer()
+        return
+
+    await db.update_console_status(console_name, new_status)
+    await db.add_admin_log(callback.from_user.id, "console", f"{console_name} → {new_status}")
+    await callback.answer(f"✅ {console_name} → {new_status}", show_alert=True)
+    await adm_consoles(callback)
+
+
+@router.callback_query(F.data == "console_no_note")
+async def adm_console_no_note(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await db.update_console_status(data["console_name"], data["console_status"])
+    await db.add_admin_log(callback.from_user.id, "console", f"{data['console_name']} → broken")
+    await state.clear()
+    await callback.answer("🔴 Отмечено", show_alert=True)
+    await adm_consoles(callback)
+
+
+@router.message(AdminStates.console_note)
+async def adm_console_note_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    note = message.text.strip()
+    await db.update_console_status(data["console_name"], data["console_status"], note)
+    await db.add_admin_log(message.from_user.id, "console",
+                           f"{data['console_name']} → {data['console_status']}: {note}")
+    await state.clear()
+    await message.answer(
+        f"🔴 {data['console_name']} — поломка.\n{'Проблема: ' + note if note else ''}",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER NOTES
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("adm_note:"))
+async def adm_add_note(callback: CallbackQuery, state: FSMContext):
+    tg_id = int(callback.data.split(":")[1])
+    user = await db.get_user(tg_id)
+    if not user:
+        await callback.answer("Не найден", show_alert=True)
+        return
+
+    await state.update_data(note_user_id=user["id"], note_user_tg=tg_id, note_user_name=user["full_name"])
+    await callback.message.edit_text(f"📝 Заметка о {user['full_name']}\n\nВведи текст:")
+    await state.set_state(AdminStates.adding_user_note)
+    await callback.answer()
+
+
+@router.message(AdminStates.adding_user_note)
+async def adm_save_note(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await db.add_user_note(data["note_user_id"], message.from_user.id, message.text)
+    await db.add_admin_log(message.from_user.id, "user_note",
+                           f"Заметка о {data['note_user_name']}")
+    await state.clear()
+    await message.answer(
+        f"📝 Заметка о {data['note_user_name']} сохранена.",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  TARGETED PROMO
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:targeted_promo")
+async def adm_targeted_promo(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    vip = await db.get_vip_users(5)
+    inactive = await db.get_inactive_users(30)
+    bday = await db.get_users_with_birthday_soon(7)
+    all_users = await db.get_all_users()
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🌟 VIP (5+ визитов) — {len(vip)}", callback_data="adm_target:vip")],
+        [InlineKeyboardButton(text=f"😴 Неактивные (30д) — {len(inactive)}", callback_data="adm_target:inactive")],
+        [InlineKeyboardButton(text=f"🎂 Именинники (7д) — {len(bday)}", callback_data="adm_target:birthday")],
+        [InlineKeyboardButton(text=f"📢 Все — {len(all_users)}", callback_data="adm_target:all")],
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
+    ])
+    await callback.message.edit_text(
+        f"🎯 Целевая рассылка\n{'─' * 28}\n\nВыбери сегмент:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_target:"))
+async def adm_target_segment(callback: CallbackQuery, state: FSMContext):
+    segment = callback.data.split(":")[1]
+    await state.update_data(target_segment=segment)
+
+    names = {"vip": "VIP", "inactive": "Неактивные", "birthday": "Именинники", "all": "Все"}
+    await callback.message.edit_text(f"🎯 Сегмент: {names.get(segment)}\n\nВведи текст сообщения:")
+    await state.set_state(AdminStates.targeted_promo_text)
+    await callback.answer()
+
+
+@router.message(AdminStates.targeted_promo_text)
+async def adm_send_targeted(message: Message, state: FSMContext):
+    data = await state.get_data()
+    segment = data["target_segment"]
+    text = message.text
+
+    if segment == "vip":
+        users = await db.get_vip_users(5)
+    elif segment == "inactive":
+        users = await db.get_inactive_users(30)
+    elif segment == "birthday":
+        users = await db.get_users_with_birthday_soon(7)
+    else:
+        users = await db.get_all_users()
+
+    sent = 0
+    failed = 0
+    for user in users:
+        try:
+            await message.bot.send_message(user["telegram_id"], f"📢 {text}\n\n— Scorpion Platinum")
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await db.add_admin_log(message.from_user.id, "targeted_promo",
+                           f"Сегмент: {segment}, отправлено: {sent}")
+    await state.clear()
+    await message.answer(
+        f"✅ Целевая рассылка\n📤 Отправлено: {sent}\n❌ Ошибок: {failed}",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  SETTINGS EDITOR
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("adm_set:"))
+async def adm_edit_setting(callback: CallbackQuery, state: FSMContext):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    setting = callback.data.split(":")[1]
+    current = {
+        "price": PRICE_PER_HOUR,
+        "fullday": 12000,
+        "hours_start": 10,
+        "hours_end": 3,
+        "capacity": MAX_CAPACITY,
+    }
+    names = {
+        "price": "Цена за час (₽)",
+        "fullday": "Цена за сутки (₽)",
+        "hours_start": "Час открытия (0-23)",
+        "hours_end": "Час закрытия (0-23)",
+        "capacity": "Макс. гостей",
+    }
+
+    import config
+    if setting == "fullday":
+        cur_val = config.PRICE_FULL_DAY
+    elif setting == "hours_start":
+        cur_val = config.WORK_HOURS_START
+    elif setting == "hours_end":
+        cur_val = config.WORK_HOURS_END
+    else:
+        cur_val = current.get(setting, "?")
+
+    await state.update_data(setting_name=setting)
+    await callback.message.edit_text(
+        f"⚙️ {names.get(setting, setting)}\nТекущее: {cur_val}\n\nВведи новое значение:"
+    )
+    await state.set_state(AdminStates.editing_setting)
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_setting)
+async def adm_save_setting(message: Message, state: FSMContext):
+    import config as cfg
+    data = await state.get_data()
+    setting = data["setting_name"]
+
+    try:
+        value = int(message.text.strip())
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи положительное число:")
+        return
+
+    attr_map = {
+        "price": "PRICE_PER_HOUR",
+        "fullday": "PRICE_FULL_DAY",
+        "hours_start": "WORK_HOURS_START",
+        "hours_end": "WORK_HOURS_END",
+        "capacity": "MAX_CAPACITY",
+    }
+
+    attr = attr_map.get(setting)
+    if attr:
+        setattr(cfg, attr, value)
+        try:
+            import re as _re
+            config_path = "/opt/scorpion-bot/config.py"
+            with open(config_path) as f:
+                cfg_content = f.read()
+            cfg_content = _re.sub(
+                rf'^{attr}\s*=\s*\d+',
+                f'{attr} = {value}',
+                cfg_content,
+                flags=_re.MULTILINE,
+            )
+            with open(config_path, 'w') as f:
+                f.write(cfg_content)
+        except Exception as e:
+            await message.answer(f"⚠️ В памяти обновлено, файл: {e}")
+
+    await db.add_admin_log(message.from_user.id, "setting", f"{setting} = {value}")
+    await state.clear()
+    await message.answer(f"✅ {setting} → {value}", reply_markup=admin_menu_kb())
+
+
+# ═══════════════════════════════════════════════════════════
+#  TOP CUSTOMERS
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:top_customers")
+async def adm_top_customers(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    top = await db.get_top_customers(15)
+    text = f"🏆 Топ клиентов\n{'─' * 28}\n\n"
+
+    if top:
+        for i, u in enumerate(top, 1):
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+            text += (
+                f"  {medal} {u['full_name']} — "
+                f"{u['booking_count']} бр. | {u['total_spent']:,}₽ | "
+                f"{u['visits_count']} визитов\n"
+            )
+    else:
+        text += "Нет данных"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К статистике", callback_data="adm:stats")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  MONTHLY REPORT
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:monthly")
+async def adm_monthly_report(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    today = date.today()
+    report = await db.get_monthly_report(today.year, today.month)
+
+    month_names = {
+        1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+        5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+        9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+    }
+
+    base_rev = report["revenue"] - report["extras_revenue"]
+    avg_bk = report["revenue"] // report["bookings"] if report["bookings"] else 0
+    avg_guest = report["revenue"] // report["guests"] if report["guests"] else 0
+
+    text = (
+        f"📊 {month_names[today.month]} {today.year}\n"
+        f"{'─' * 28}\n\n"
+        f"📋 Бронирований: {report['bookings']}\n"
+        f"👥 Гостей: {report['guests']}\n"
+        f"⏳ Часов: {report['hours']}\n"
+        f"❌ Отмен: {report['cancellations']}\n"
+        f"🚷 Неявок: {report['noshows']}\n"
+        f"👤 Новых: {report['new_users']}\n\n"
+        f"💰 Финансы:\n"
+        f"  Выручка: {report['revenue']:,}₽\n"
+        f"  Аренда: {base_rev:,}₽\n"
+        f"  Допы: {report['extras_revenue']:,}₽\n"
+        f"  Ср. чек: {avg_bk:,}₽\n"
+        f"  Ср./гость: {avg_guest:,}₽\n"
+    )
+
+    prev_m = today.month - 1 if today.month > 1 else 12
+    prev_y = today.year if today.month > 1 else today.year - 1
+    prev = await db.get_monthly_report(prev_y, prev_m)
+
+    if prev["revenue"] > 0:
+        change = ((report["revenue"] - prev["revenue"]) / prev["revenue"]) * 100
+        icon = "📈" if change >= 0 else "📉"
+        text += f"\n{icon} vs {month_names[prev_m]}: {change:+.0f}%\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К статистике", callback_data="adm:stats")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()

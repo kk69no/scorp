@@ -57,7 +57,18 @@ class AdminStates(StatesGroup):
     setting_hours_start = State()
     setting_hours_end = State()
     setting_capacity = State()
+    editing_setting = State()
     # Unblock date
     unblock_choosing_date = State()
     # Export
     export_choosing_period = State()
+    # Promo codes
+    creating_promo_code = State()
+    promo_discount = State()
+    promo_max_uses = State()
+    # User notes
+    adding_user_note = State()
+    # Console management
+    console_note = State()
+    # Targeted promo
+    targeted_promo_text = State()
