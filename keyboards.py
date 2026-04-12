@@ -22,6 +22,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📅 Забронировать"), KeyboardButton(text="🔄 Как в прошлый раз")],
             [KeyboardButton(text="📋 Мои брони"), KeyboardButton(text="🎁 Бонусы")],
+            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="❓ Помощь")],
             [KeyboardButton(text="ℹ️ О нас"), KeyboardButton(text="💬 Связь с менеджером")],
         ],
         resize_keyboard=True,
@@ -237,6 +238,7 @@ def confirmation_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_booking"),
             InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_booking"),
         ],
+        [InlineKeyboardButton(text="🎫 Промокод", callback_data="book:promo")],
     ])
 
 

@@ -15,6 +15,29 @@ from keyboards import (
 )
 from config import WEEKDAYS_RU
 
+def _countdown(booking_date: str, start_hour: int) -> str:
+    """Return human-readable countdown to booking."""
+    from datetime import datetime, timedelta
+    try:
+        dt = datetime.strptime(booking_date, "%Y-%m-%d").replace(hour=start_hour)
+        now = datetime.now()
+        diff = dt - now
+        if diff.total_seconds() <= 0:
+            return ""
+        days = diff.days
+        hours = diff.seconds // 3600
+        if days > 0:
+            return f"⏳ через {days}д {hours}ч"
+        elif hours > 0:
+            return f"⏳ через {hours}ч"
+        else:
+            mins = diff.seconds // 60
+            return f"⏳ через {mins} мин"
+    except Exception:
+        return ""
+
+
+
 router = Router()
 
 
@@ -43,10 +66,12 @@ async def my_bookings(message: Message, state: FSMContext):
         for b in active:
             d = date.fromisoformat(b["booking_date"])
             wd = WEEKDAYS_RU[d.weekday()]
+            cd = _countdown(b["booking_date"], int(b["start_time"].split(":")[0]))
             text += (
                 f"  #{b['id']} — {b['booking_date']} ({wd}) "
                 f"{b['start_time']}–{b['end_time']} | "
-                f"👥 {b['guests_count']} | 💵 {b['total_price']}₽\n"
+                f"👥 {b['guests_count']} | 💵 {b['total_price']}₽"
+                f"{(' ' + cd) if cd else ''}\n"
             )
 
     # Show recent history

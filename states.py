@@ -72,3 +72,9 @@ class AdminStates(StatesGroup):
     console_note = State()
     # Targeted promo
     targeted_promo_text = State()
+
+
+class ProfileStates(StatesGroup):
+    editing_name = State()
+    editing_phone = State()
+    editing_birthday = State()

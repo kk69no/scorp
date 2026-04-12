@@ -54,6 +54,8 @@ async def send_reminders():
         bookings = await db.get_upcoming_reminders()
         for b in bookings:
             try:
+                if not b.get("notify_reminders", 1):
+                    continue
                 await _bot.send_message(
                     b["telegram_id"],
                     f"🔔 Напоминание!\n\n"
@@ -120,6 +122,8 @@ async def send_birthday_promos():
                         f"Нажми «📅 Забронировать» 👇"
                     )
 
+                if not user.get("notify_birthday", 1):
+                    continue
                 await _bot.send_message(user["telegram_id"], text)
                 logger.info(f"Birthday promo sent to {user['full_name']}")
             except Exception as e:
@@ -155,6 +159,8 @@ async def send_availability_promo():
                 if sent >= 50:
                     break
                 try:
+                    if not user.get("notify_promos", 1):
+                        continue
                     await _bot.send_message(
                         user["telegram_id"],
                         f"🌙 Сегодня вечером Scorpion Platinum свободен!\n\n"

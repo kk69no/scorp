@@ -31,7 +31,11 @@ async def init_db():
                 full_name       TEXT NOT NULL,
                 phone           TEXT,
                 birthday        TEXT,
-                referral_code   TEXT UNIQUE NOT NULL,
+                referral_code   TEXT UNIQUE,
+                notify_reminders  INTEGER DEFAULT 1,
+                notify_promos     INTEGER DEFAULT 1,
+                notify_birthday   INTEGER DEFAULT 1,
+                pending_discount  INTEGER DEFAULT 0 NOT NULL,
                 referred_by     INTEGER REFERENCES users(id),
                 loyalty_points  INTEGER DEFAULT 0,
                 visits_count    INTEGER DEFAULT 0,
@@ -1247,5 +1251,38 @@ async def get_vip_users(min_visits: int = 5) -> list[dict]:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+# ─── Referrals & profile helpers ─────────────────────────
+
+async def get_referrals(user_id: int) -> list[dict]:
+    """Get users referred by this user (by internal id)."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM users WHERE referred_by = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_user_total_spent(telegram_id: int) -> int:
+    """Total money spent by user on completed bookings."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT COALESCE(SUM(b.total_price), 0) as total
+               FROM bookings b
+               JOIN users u ON b.user_id = u.id
+               WHERE u.telegram_id = ? AND b.status = 'completed'""",
+            (telegram_id,),
+        )
+        row = await cur.fetchone()
+        return row["total"] if row else 0
     finally:
         await db.close()

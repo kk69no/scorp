@@ -15,6 +15,30 @@ from config import (
 
 router = Router()
 
+TIERS = [
+    (0, "🥉 Бронза"),
+    (5, "🥈 Серебро"),
+    (10, "🥇 Золото"),
+    (20, "💎 Платина"),
+]
+
+
+def _get_tier_info(visits: int) -> str:
+    tier_name = TIERS[0][1]
+    next_info = ""
+    for i, (min_v, name) in enumerate(TIERS):
+        if visits >= min_v:
+            tier_name = name
+        else:
+            remaining = min_v - visits
+            filled = min(int((visits - TIERS[i-1][0]) / (min_v - TIERS[i-1][0]) * 10), 10) if i > 0 else 0
+            bar = "█" * filled + "░" * (10 - filled)
+            next_info = f"[{bar}] До {name}: ещё {remaining}"
+            break
+    else:
+        next_info = "🏆 Максимальный уровень!"
+    return f"{tier_name}\n{next_info}"
+
 
 @router.message(F.text == "🎁 Бонусы")
 async def show_loyalty(message: Message):
@@ -31,11 +55,14 @@ async def show_loyalty(message: Message):
     else:
         next_free_text = f"До бесплатного часа: ещё {next_free} визит(ов)"
 
+    tier_info = _get_tier_info(visits)
+
     text = (
         f"🎁 Программа лояльности\n"
         f"{'─' * 28}\n\n"
         f"👤 {user['full_name']}\n"
         f"🎟 Реферальный код: {user['referral_code']}\n\n"
+        f"{tier_info}\n\n"
         f"📊 Статистика:\n"
         f"  🏆 Визитов: {visits}\n"
         f"  💎 Баллов: {points}\n"

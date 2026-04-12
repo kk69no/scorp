@@ -6,6 +6,7 @@ Date -> Time -> Duration -> Guests -> Extras -> Confirmation
 from datetime import date, datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 
 import database as db
@@ -531,6 +532,23 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user = await db.get_user(callback.from_user.id)
 
+    # Apply promo code & pending discount
+    total_price = data["total_price"]
+    promo_code = data.get("promo_code")
+    promo_disc_pct = data.get("promo_discount_percent", 0)
+    promo_disc_amt = data.get("promo_discount_amount", 0)
+    pending_disc = user.get("pending_discount", 0) or 0
+
+    if promo_disc_pct:
+        total_price = int(total_price * (100 - promo_disc_pct) / 100)
+    if promo_disc_amt:
+        total_price = max(0, total_price - promo_disc_amt)
+    if pending_disc:
+        total_price = max(0, total_price - pending_disc)
+        await db.update_user(callback.from_user.id, pending_discount=0)
+    if promo_code:
+        await db.use_promo_code(promo_code)
+
     booking_id = await db.create_booking(
         user_id=user["id"],
         booking_date=data["booking_date"],
@@ -541,7 +559,7 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         base_price=data["base_price"],
         extras_price=data["extras_price"],
         discount=data["discount"],
-        total_price=data["total_price"],
+        total_price=total_price,
         extras=data.get("extras_list"),
     )
 
@@ -589,3 +607,60 @@ async def cancel_booking_flow(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Бронирование отменено.")
     await callback.message.answer("Главное меню 👇", reply_markup=main_menu_kb())
     await callback.answer()
+
+
+# ─── Promo code at confirmation ──────────────────────────
+
+@router.callback_query(BookingStates.confirmation, F.data == "book:promo")
+async def booking_promo_start(callback: CallbackQuery, state: FSMContext):
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    await callback.message.edit_text(
+        "🎫 Введи промокод:\n\n"
+        "Отправь код текстом или нажми пропустить.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Пропустить", callback_data="book:skip_promo")],
+        ]),
+    )
+    await state.update_data(awaiting_promo=True)
+    await callback.answer()
+
+
+@router.callback_query(BookingStates.confirmation, F.data == "book:skip_promo")
+async def booking_skip_promo(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(awaiting_promo=False, promo_code=None)
+    await _show_confirmation(callback, state)
+    await callback.answer()
+
+
+@router.message(BookingStates.confirmation)
+async def booking_promo_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("awaiting_promo"):
+        return
+    code = message.text.strip().upper()
+    promo = await db.validate_promo_code(code)
+    if not promo:
+        await message.answer("❌ Промокод недействителен. Попробуй другой или пропусти.")
+        return
+    await state.update_data(
+        awaiting_promo=False,
+        promo_code=code,
+        promo_discount_percent=promo.get("discount_percent", 0),
+        promo_discount_amount=promo.get("discount_amount", 0),
+    )
+    await message.answer(f"✅ Промокод {code} применён!")
+    # Show updated confirmation - we need to get a way to show without callback
+    # Use message.answer with the confirmation text
+    data = await state.get_data()
+    total = data.get("total_price", 0)
+    pct = promo.get("discount_percent", 0)
+    amt = promo.get("discount_amount", 0)
+    disc_text = ""
+    if pct:
+        disc_text = f"Скидка {pct}% будет применена"
+    elif amt:
+        disc_text = f"Скидка {amt}₽ будет применена"
+    await message.answer(
+        f"🎫 Промокод применён!\n{disc_text}\n\nНажми «✅ Подтвердить» для завершения.",
+        reply_markup=confirmation_kb(),
+    )
