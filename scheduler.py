@@ -4,16 +4,19 @@ Scheduled tasks:
 - Feedback requests (30min after visit ends)
 - Birthday promos (7 days before)
 - Available slot notifications (weekday evenings)
+- Auto-complete expired bookings
+- Daily morning report to admins
 """
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import database as db
 from config import (
     REMINDER_BEFORE_HOURS, FEEDBACK_AFTER_MINUTES,
-    BIRTHDAY_DISCOUNT_PERCENT, VENUE_NAME,
+    BIRTHDAY_DISCOUNT_PERCENT, VENUE_NAME, ADMIN_IDS,
+    WEEKDAYS_RU,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,23 +30,18 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     _bot = bot
     _scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Every 5 minutes: check for reminders
     _scheduler.add_job(send_reminders, "interval", minutes=5, id="reminders")
-
-    # Every 10 minutes: check for feedback requests
     _scheduler.add_job(send_feedback_requests, "interval", minutes=10, id="feedback")
-
-    # Daily at 10:00: birthday promos
     _scheduler.add_job(send_birthday_promos, "cron", hour=10, minute=0, id="birthdays")
-
-    # Weekday evenings at 18:00: promo for empty slots
     _scheduler.add_job(
         send_availability_promo, "cron",
         day_of_week="mon-thu", hour=18, minute=0, id="avail_promo"
     )
+    _scheduler.add_job(run_auto_complete, "interval", minutes=30, id="auto_complete")
+    _scheduler.add_job(send_daily_report, "cron", hour=9, minute=0, id="daily_report")
 
     _scheduler.start()
-    logger.info("Scheduler started with 4 jobs")
+    logger.info("Scheduler started with 6 jobs")
     return _scheduler
 
 
@@ -133,7 +131,6 @@ async def send_birthday_promos():
 # ─── Available slots promo ───────────────────────────────
 
 async def send_availability_promo():
-    """On weekday evenings, notify users if tonight has open slots."""
     if not _bot:
         return
     try:
@@ -142,22 +139,20 @@ async def send_availability_promo():
             return
 
         bookings = await db.get_bookings_for_date(today_str)
-        # Check if evening slots (18-23) are free
         evening_booked = [
             b for b in bookings
             if int(b["start_time"].split(":")[0]) >= 18
         ]
 
-        if len(evening_booked) < 2:  # Mostly free evening
+        if len(evening_booked) < 2:
             users = await db.get_all_users()
-            # Only notify users who haven't booked today
             booked_user_ids = {b["user_id"] for b in bookings}
 
             sent = 0
             for user in users:
                 if user["id"] in booked_user_ids:
                     continue
-                if sent >= 50:  # Limit per batch
+                if sent >= 50:
                     break
                 try:
                     await _bot.send_message(
@@ -174,3 +169,71 @@ async def send_availability_promo():
             logger.info(f"Availability promo sent to {sent} users")
     except Exception as e:
         logger.error(f"Availability promo error: {e}")
+
+
+# ─── Auto-complete expired bookings ──────────────────────
+
+async def run_auto_complete():
+    try:
+        count = await db.auto_complete_expired()
+        if count > 0:
+            logger.info(f"Auto-completed {count} expired bookings")
+    except Exception as e:
+        logger.error(f"Auto-complete error: {e}")
+
+
+# ─── Daily morning report ────────────────────────────────
+
+async def send_daily_report():
+    if not _bot:
+        return
+    try:
+        today = date.today()
+        today_str = today.isoformat()
+        wd = WEEKDAYS_RU[today.weekday()]
+
+        bookings = await db.get_bookings_for_date(today_str)
+        stats = await db.get_stats()
+
+        total_guests = sum(b["guests_count"] for b in bookings)
+        total_revenue = sum(b["total_price"] for b in bookings)
+
+        text = (
+            f"☀️ Утренний отчёт — {today_str} ({wd})\n"
+            f"{'─' * 30}\n\n"
+            f"📋 Броней на сегодня: {len(bookings)}\n"
+            f"👥 Гостей: {total_guests}\n"
+            f"💵 Выручка сегодня: {total_revenue:,}₽\n\n"
+        )
+
+        if bookings:
+            text += "📅 Расписание:\n"
+            for b in bookings:
+                text += (
+                    f"  {b['start_time']}–{b['end_time']} | "
+                    f"{b['full_name']} ({b['guests_count']} чел.) — "
+                    f"{b['total_price']:,}₽\n"
+                )
+            text += "\n"
+
+        text += (
+            f"📊 Общая статистика:\n"
+            f"  За неделю: {stats['week_revenue']:,}₽\n"
+            f"  Активных броней: {stats['active_bookings']}\n"
+            f"  Новых клиентов: +{stats['new_users_week']}\n"
+        )
+
+        admin_tg_ids = set(ADMIN_IDS)
+        db_admins = await db.get_admins()
+        for a in db_admins:
+            admin_tg_ids.add(a["telegram_id"])
+
+        for tg_id in admin_tg_ids:
+            try:
+                await _bot.send_message(tg_id, text)
+            except Exception as e:
+                logger.error(f"Failed daily report to {tg_id}: {e}")
+
+        logger.info(f"Daily report sent to {len(admin_tg_ids)} admins")
+    except Exception as e:
+        logger.error(f"Daily report error: {e}")

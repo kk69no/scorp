@@ -4,6 +4,8 @@ Database layer — aiosqlite + all CRUD operations.
 
 import aiosqlite
 import secrets
+import csv
+import io
 from datetime import datetime, date, time, timedelta
 from typing import Optional
 
@@ -53,6 +55,7 @@ async def init_db():
                 total_price     INTEGER NOT NULL DEFAULT 0,
                 prepaid         INTEGER DEFAULT 0,
                 status          TEXT NOT NULL DEFAULT 'pending',
+                admin_note      TEXT DEFAULT '',
                 created_at      TEXT DEFAULT (datetime('now', 'localtime')),
                 reminded        INTEGER DEFAULT 0
             );
@@ -188,8 +191,48 @@ async def get_all_users() -> list[dict]:
         await db.close()
 
 
+async def get_all_users_including_blocked() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM users ORDER BY created_at DESC")
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def search_users(query: str) -> list[dict]:
+    db = await get_db()
+    try:
+        q = f"%{query}%"
+        cur = await db.execute(
+            """SELECT * FROM users
+               WHERE full_name LIKE ? OR phone LIKE ? OR username LIKE ?
+               ORDER BY created_at DESC LIMIT 20""",
+            (q, q, q),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 async def set_admin(telegram_id: int) -> None:
     await update_user(telegram_id, is_admin=1)
+
+
+async def remove_admin(telegram_id: int) -> None:
+    await update_user(telegram_id, is_admin=0)
+
+
+async def get_admins() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT * FROM users WHERE is_admin = 1")
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
 
 
 async def is_admin(telegram_id: int) -> bool:
@@ -241,6 +284,18 @@ async def add_loyalty_points(telegram_id: int, points: int) -> None:
         await db.close()
 
 
+async def set_loyalty_points(telegram_id: int, points: int) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE users SET loyalty_points = ? WHERE telegram_id = ?",
+            (points, telegram_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def increment_visits(telegram_id: int) -> int:
     """Returns new visit count."""
     db = await get_db()
@@ -273,16 +328,18 @@ async def create_booking(
     discount: int,
     total_price: int,
     extras: list[dict] | None = None,
+    admin_note: str = "",
 ) -> int:
     db = await get_db()
     try:
         cur = await db.execute(
             """INSERT INTO bookings
                (user_id, booking_date, start_time, end_time, duration_hours,
-                guests_count, base_price, extras_price, discount, total_price, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed')""",
+                guests_count, base_price, extras_price, discount, total_price,
+                status, admin_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)""",
             (user_id, booking_date, start_time, end_time, duration_hours,
-             guests_count, base_price, extras_price, discount, total_price),
+             guests_count, base_price, extras_price, discount, total_price, admin_note),
         )
         booking_id = cur.lastrowid
 
@@ -352,6 +409,20 @@ async def get_user_bookings(telegram_id: int, active_only: bool = False) -> list
         await db.close()
 
 
+async def get_user_bookings_by_id(user_id: int, limit: int = 10) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT * FROM bookings WHERE user_id = ?
+               ORDER BY booking_date DESC, start_time DESC LIMIT ?""",
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 async def get_last_booking(telegram_id: int) -> Optional[dict]:
     db = await get_db()
     try:
@@ -400,6 +471,19 @@ async def update_booking_status(booking_id: int, status: str) -> None:
         await db.close()
 
 
+async def update_booking_fields(booking_id: int, **kwargs) -> None:
+    if not kwargs:
+        return
+    db = await get_db()
+    try:
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [booking_id]
+        await db.execute(f"UPDATE bookings SET {sets} WHERE id = ?", vals)
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def mark_reminded(booking_id: int) -> None:
     db = await get_db()
     try:
@@ -412,7 +496,6 @@ async def mark_reminded(booking_id: int) -> None:
 
 
 async def get_guests_at_time(booking_date: str, time_str: str) -> int:
-    """Get total confirmed guests for a given date and time slot."""
     db = await get_db()
     try:
         cur = await db.execute(
@@ -430,7 +513,6 @@ async def get_guests_at_time(booking_date: str, time_str: str) -> int:
 
 
 async def get_available_capacity(booking_date: str, start_time: str, duration_hours: int) -> int:
-    """Get minimum available capacity across all hours of a potential booking."""
     from config import MAX_CAPACITY
     min_avail = MAX_CAPACITY
 
@@ -462,8 +544,24 @@ async def get_bookings_for_date(booking_date: str) -> list[dict]:
         await db.close()
 
 
+async def get_bookings_for_period(start_date: str, end_date: str) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT b.*, u.full_name, u.phone, u.telegram_id
+               FROM bookings b JOIN users u ON b.user_id = u.id
+               WHERE b.booking_date BETWEEN ? AND ?
+                 AND b.status IN ('confirmed', 'pending', 'completed')
+               ORDER BY b.booking_date, b.start_time""",
+            (start_date, end_date),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 async def get_upcoming_reminders() -> list[dict]:
-    """Get bookings that need reminders (2 hours before)."""
     from config import REMINDER_BEFORE_HOURS
     db = await get_db()
     try:
@@ -489,7 +587,6 @@ async def get_upcoming_reminders() -> list[dict]:
 
 
 async def get_completed_needing_feedback() -> list[dict]:
-    """Get bookings completed ~30 min ago that haven't been reviewed."""
     from config import FEEDBACK_AFTER_MINUTES
     db = await get_db()
     try:
@@ -512,6 +609,27 @@ async def get_completed_needing_feedback() -> list[dict]:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def auto_complete_expired() -> int:
+    """Auto-complete bookings whose end time has passed. Returns count."""
+    db = await get_db()
+    try:
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        current_time = now.strftime("%H:%M")
+
+        cur = await db.execute(
+            """UPDATE bookings SET status = 'completed'
+               WHERE status = 'confirmed'
+                 AND (booking_date < ?
+                      OR (booking_date = ? AND end_time <= ?))""",
+            (today, today, current_time),
+        )
+        await db.commit()
+        return cur.rowcount
     finally:
         await db.close()
 
@@ -552,6 +670,18 @@ async def is_date_blocked(check_date: str) -> bool:
         await db.close()
 
 
+async def get_all_blocked_dates() -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT * FROM blocked_dates WHERE blocked_date >= date('now','localtime') ORDER BY blocked_date"
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 # ─── Reviews ─────────────────────────────────────────────
 
 async def create_review(user_id: int, booking_id: int | None, rating: int, comment: str = "") -> int:
@@ -576,6 +706,21 @@ async def get_average_rating() -> tuple[float, int]:
         row = await cur.fetchone()
         avg = round(row["avg_r"], 1) if row["avg_r"] else 0.0
         return avg, row["cnt"]
+    finally:
+        await db.close()
+
+
+async def get_all_reviews(limit: int = 30) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT r.*, u.full_name, u.telegram_id
+               FROM reviews r JOIN users u ON r.user_id = u.id
+               ORDER BY r.created_at DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
     finally:
         await db.close()
 
@@ -614,6 +759,13 @@ async def get_stats() -> dict:
         cur = await db.execute(
             """SELECT COALESCE(SUM(total_price), 0) as s FROM bookings
                WHERE status = 'completed'
+                 AND booking_date >= date('now', 'localtime', '-7 days')"""
+        )
+        stats["week_revenue"] = (await cur.fetchone())["s"]
+
+        cur = await db.execute(
+            """SELECT COALESCE(SUM(total_price), 0) as s FROM bookings
+               WHERE status = 'completed'
                  AND booking_date >= date('now', 'localtime', '-30 days')"""
         )
         stats["month_revenue"] = (await cur.fetchone())["s"]
@@ -632,6 +784,11 @@ async def get_stats() -> dict:
             "SELECT COUNT(*) as c FROM bookings WHERE status = 'no_show'"
         )
         stats["noshows"] = (await cur.fetchone())["c"]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) as c FROM bookings WHERE status = 'cancelled'"
+        )
+        stats["cancellations"] = (await cur.fetchone())["c"]
 
         # Popular hours
         cur = await db.execute(
@@ -656,13 +813,73 @@ async def get_stats() -> dict:
         )
         stats["popular_days"] = [dict(r) for r in await cur.fetchall()]
 
+        # Avg guests per booking
+        cur = await db.execute(
+            """SELECT COALESCE(AVG(guests_count), 0) as a FROM bookings
+               WHERE status IN ('confirmed', 'completed')"""
+        )
+        stats["avg_guests"] = round((await cur.fetchone())["a"], 1)
+
+        # Avg duration
+        cur = await db.execute(
+            """SELECT COALESCE(AVG(duration_hours), 0) as a FROM bookings
+               WHERE status IN ('confirmed', 'completed')"""
+        )
+        stats["avg_duration"] = round((await cur.fetchone())["a"], 1)
+
+        # New users this week
+        cur = await db.execute(
+            """SELECT COUNT(*) as c FROM users
+               WHERE created_at >= datetime('now', 'localtime', '-7 days')"""
+        )
+        stats["new_users_week"] = (await cur.fetchone())["c"]
+
+        # Repeat rate
+        cur = await db.execute(
+            """SELECT COUNT(*) as c FROM users WHERE visits_count >= 2"""
+        )
+        stats["repeat_users"] = (await cur.fetchone())["c"]
+
         return stats
     finally:
         await db.close()
 
 
+async def get_hourly_occupancy(booking_date: str) -> dict[str, int]:
+    """Returns guests count per hour slot for a date."""
+    from config import WORK_HOURS_START, WORK_HOURS_END
+    result = {}
+    if WORK_HOURS_END <= WORK_HOURS_START:
+        hours = list(range(WORK_HOURS_START, 24)) + list(range(0, WORK_HOURS_END))
+    else:
+        hours = list(range(WORK_HOURS_START, WORK_HOURS_END))
+
+    for h in hours:
+        time_str = f"{h:02d}:00"
+        count = await get_guests_at_time(booking_date, time_str)
+        result[time_str] = count
+    return result
+
+
+async def get_revenue_by_day(days: int = 30) -> list[dict]:
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT booking_date, COUNT(*) as bookings,
+                      SUM(total_price) as revenue, SUM(guests_count) as guests
+               FROM bookings
+               WHERE status = 'completed'
+                 AND booking_date >= date('now', 'localtime', ? || ' days')
+               GROUP BY booking_date ORDER BY booking_date DESC""",
+            (f"-{days}",),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 async def get_users_with_birthday_soon(days_ahead: int = 7) -> list[dict]:
-    """Get users whose birthday is within the next N days."""
     db = await get_db()
     try:
         today = date.today()
@@ -685,5 +902,37 @@ async def get_users_with_birthday_soon(days_ahead: int = 7) -> list[dict]:
             except (ValueError, TypeError):
                 continue
         return results
+    finally:
+        await db.close()
+
+
+async def export_bookings_csv(days: int = 30) -> str:
+    """Export bookings as CSV string."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            """SELECT b.id, b.booking_date, b.start_time, b.end_time,
+                      b.duration_hours, b.guests_count, b.total_price,
+                      b.status, b.admin_note, u.full_name, u.phone
+               FROM bookings b JOIN users u ON b.user_id = u.id
+               WHERE b.booking_date >= date('now', 'localtime', ? || ' days')
+               ORDER BY b.booking_date DESC, b.start_time DESC""",
+            (f"-{days}",),
+        )
+        rows = await cur.fetchall()
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "ID", "Дата", "Начало", "Конец", "Часы", "Гости",
+            "Сумма", "Статус", "Заметка", "Клиент", "Телефон"
+        ])
+        for r in rows:
+            writer.writerow([
+                r["id"], r["booking_date"], r["start_time"], r["end_time"],
+                r["duration_hours"], r["guests_count"], r["total_price"],
+                r["status"], r["admin_note"] or "", r["full_name"], r["phone"] or ""
+            ])
+        return output.getvalue()
     finally:
         await db.close()

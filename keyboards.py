@@ -298,14 +298,18 @@ def feedback_comment_kb() -> InlineKeyboardMarkup:
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Брони сегодня", callback_data="adm:today")],
-        [InlineKeyboardButton(text="📅 Брони на неделю", callback_data="adm:week")],
-        [InlineKeyboardButton(text="🚫 Заблокировать дату", callback_data="adm:block_date")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
-        [InlineKeyboardButton(text="⛔ Чёрный список", callback_data="adm:blacklist")],
+        [InlineKeyboardButton(text="📋 Сегодня", callback_data="adm:today"),
+         InlineKeyboardButton(text="📅 Неделя", callback_data="adm:week")],
+        [InlineKeyboardButton(text="📊 Загрузка", callback_data="adm:occupancy"),
+         InlineKeyboardButton(text="📈 Статистика", callback_data="adm:stats")],
+        [InlineKeyboardButton(text="📝 Ручная бронь", callback_data="adm:manual_booking")],
+        [InlineKeyboardButton(text="📅 Управление датами", callback_data="adm:dates")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="adm:users")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:promo")],
-        [InlineKeyboardButton(text="✅ Отметить завершение", callback_data="adm:complete")],
-        [InlineKeyboardButton(text="🚷 Отметить неявку", callback_data="adm:noshow")],
+        [InlineKeyboardButton(text="✅ Завершить", callback_data="adm:complete"),
+         InlineKeyboardButton(text="🚷 Неявка", callback_data="adm:noshow")],
+        [InlineKeyboardButton(text="📤 Экспорт", callback_data="adm:export"),
+         InlineKeyboardButton(text="⚙️ Настройки", callback_data="adm:settings")],
     ])
 
 

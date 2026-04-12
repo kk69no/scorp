@@ -1,10 +1,11 @@
 """
-Admin panel: view bookings, stats, blacklist, promos, no-shows.
+Admin panel — full-featured management for Scorpion Platinum.
 """
 
 from datetime import date, timedelta, datetime
+import io
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
@@ -14,7 +15,7 @@ from keyboards import (
     admin_menu_kb, admin_bookings_list_kb, admin_confirm_kb, main_menu_kb,
     calendar_kb,
 )
-from config import ADMIN_IDS, WEEKDAYS_RU, LOYALTY_VISIT_POINTS
+from config import ADMIN_IDS, WEEKDAYS_RU, LOYALTY_VISIT_POINTS, PRICE_PER_HOUR, MAX_CAPACITY
 
 router = Router()
 
@@ -25,21 +26,30 @@ async def _check_admin(user_id: int) -> bool:
     return await db.is_admin(user_id)
 
 
-# ─── /admin ──────────────────────────────────────────────
+STATUS_TEXT = {
+    "pending": "⏳ Ожидание",
+    "confirmed": "✅ Подтверждена",
+    "completed": "✅ Завершена",
+    "cancelled": "❌ Отменена",
+    "no_show": "🚷 Неявка",
+}
+
+
+# ═══════════════════════════════════════════════════════════
+#  MAIN MENU
+# ═══════════════════════════════════════════════════════════
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
 
-    # Auto-register first admin
     if not ADMIN_IDS:
         user = await db.get_user(message.from_user.id)
         if user:
             await db.set_admin(message.from_user.id)
             ADMIN_IDS.append(message.from_user.id)
             await message.answer(
-                "🔑 Ты назначен администратором!\n\n"
-                "Админ-панель 👇",
+                "🔑 Ты назначен администратором!\n\nАдмин-панель 👇",
                 reply_markup=admin_menu_kb(),
             )
             return
@@ -61,7 +71,9 @@ async def adm_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ─── Today's bookings ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  BOOKINGS — TODAY
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:today")
 async def adm_today(callback: CallbackQuery):
@@ -78,7 +90,7 @@ async def adm_today(callback: CallbackQuery):
     text = (
         f"📋 Брони на сегодня ({today_str})\n"
         f"{'─' * 28}\n"
-        f"Всего: {len(bookings)} | 👥 {total_guests} чел. | 💵 {total_revenue}₽\n"
+        f"Всего: {len(bookings)} | 👥 {total_guests} чел. | 💵 {total_revenue:,}₽\n"
     )
 
     await callback.message.edit_text(
@@ -88,7 +100,9 @@ async def adm_today(callback: CallbackQuery):
     await callback.answer()
 
 
-# ─── Week bookings ───────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  BOOKINGS — WEEK
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:week")
 async def adm_week(callback: CallbackQuery):
@@ -112,11 +126,11 @@ async def adm_week(callback: CallbackQuery):
 
         marker = "📌 " if i == 0 else "  "
         if count:
-            text += f"{marker}{d_str} ({wd}): {count} бр. | 👥 {guests} | 💵 {revenue}₽\n"
+            text += f"{marker}{d_str} ({wd}): {count} бр. | 👥 {guests} | 💵 {revenue:,}₽\n"
         else:
             text += f"{marker}{d_str} ({wd}): —\n"
 
-    text += f"\n💰 Итого за неделю: {total_all}₽"
+    text += f"\n💰 Итого за неделю: {total_all:,}₽"
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -126,7 +140,224 @@ async def adm_week(callback: CallbackQuery):
     await callback.answer()
 
 
-# ─── Block date ──────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  OCCUPANCY — HOURLY LOAD
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:occupancy")
+async def adm_occupancy(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    today_str = date.today().isoformat()
+    occ = await db.get_hourly_occupancy(today_str)
+
+    text = f"📊 Загрузка по часам — сегодня ({today_str})\n{'─' * 28}\n\n"
+    for time_str, guests in occ.items():
+        bar = "█" * guests + "░" * (MAX_CAPACITY - guests)
+        pct = int(guests / MAX_CAPACITY * 100) if MAX_CAPACITY else 0
+        text += f"  {time_str} [{bar}] {guests}/{MAX_CAPACITY} ({pct}%)\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  MANUAL BOOKING
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:manual_booking")
+async def adm_manual_booking(callback: CallbackQuery, state: FSMContext):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "📝 Ручная бронь\n\n"
+        "Введи имя клиента или Telegram ID.\n"
+        "Если клиента нет в базе — бронь создастся на тебя (админа)."
+    )
+    await state.set_state(AdminStates.manual_choosing_user)
+    await callback.answer()
+
+
+@router.message(AdminStates.manual_choosing_user)
+async def adm_manual_user(message: Message, state: FSMContext):
+    text = message.text.strip()
+
+    # Try as telegram ID
+    try:
+        tg_id = int(text)
+        user = await db.get_user(tg_id)
+    except ValueError:
+        # Search by name
+        results = await db.search_users(text)
+        if results:
+            user = results[0]
+        else:
+            user = None
+
+    if user:
+        await state.update_data(manual_user_id=user["id"], manual_user_name=user["full_name"])
+        await message.answer(
+            f"👤 Клиент: {user['full_name']}\n\n📅 Выбери дату:",
+            reply_markup=calendar_kb(0),
+        )
+    else:
+        # Book under admin
+        admin_user = await db.get_user(message.from_user.id)
+        await state.update_data(
+            manual_user_id=admin_user["id"],
+            manual_user_name=f"[РУЧНАЯ] {text}",
+            manual_note=f"Ручная бронь для: {text}",
+        )
+        await message.answer(
+            f"👤 Клиент не найден — бронь на: {text}\n\n📅 Выбери дату:",
+            reply_markup=calendar_kb(0),
+        )
+
+    await state.set_state(AdminStates.manual_choosing_date)
+
+
+@router.callback_query(AdminStates.manual_choosing_date, F.data.startswith("date:"))
+async def adm_manual_date(callback: CallbackQuery, state: FSMContext):
+    date_str = callback.data.split(":")[1]
+    await state.update_data(manual_date=date_str)
+
+    from handlers.booking import _get_work_hours
+    all_slots = _get_work_hours()
+
+    from keyboards import time_slots_kb
+    await callback.message.edit_text(
+        f"📅 Дата: {date_str}\n\n⏰ Выбери время:",
+        reply_markup=time_slots_kb(all_slots),
+    )
+    await state.set_state(AdminStates.manual_choosing_time)
+    await callback.answer()
+
+
+@router.callback_query(AdminStates.manual_choosing_time, F.data.startswith("time:"))
+async def adm_manual_time(callback: CallbackQuery, state: FSMContext):
+    start_time = callback.data.split(":")[1] + ":00"
+    await state.update_data(manual_time=start_time)
+
+    await callback.message.edit_text(
+        f"⏰ Время: {start_time}\n\n⏳ Длительность (часы)? Введи число:"
+    )
+    await state.set_state(AdminStates.manual_choosing_duration)
+    await callback.answer()
+
+
+@router.message(AdminStates.manual_choosing_duration)
+async def adm_manual_duration(message: Message, state: FSMContext):
+    try:
+        dur = int(message.text.strip())
+        if dur < 1 or dur > 24:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи число от 1 до 24:")
+        return
+
+    await state.update_data(manual_duration=dur)
+    await message.answer(f"⏳ {dur} ч.\n\n👥 Количество гостей? Введи число:")
+    await state.set_state(AdminStates.manual_choosing_guests)
+
+
+@router.message(AdminStates.manual_choosing_guests)
+async def adm_manual_guests(message: Message, state: FSMContext):
+    try:
+        guests = int(message.text.strip())
+        if guests < 1 or guests > MAX_CAPACITY:
+            raise ValueError
+    except ValueError:
+        await message.answer(f"Введи число от 1 до {MAX_CAPACITY}:")
+        return
+
+    data = await state.get_data()
+    dur = data["manual_duration"]
+    start_h = int(data["manual_time"].split(":")[0])
+    end_h = (start_h + dur) % 24
+    end_time = f"{end_h:02d}:00"
+
+    from config import PRICE_FULL_DAY
+    if dur >= 17:
+        price = PRICE_FULL_DAY
+    else:
+        price = PRICE_PER_HOUR * dur
+
+    booking_id = await db.create_booking(
+        user_id=data["manual_user_id"],
+        booking_date=data["manual_date"],
+        start_time=data["manual_time"],
+        end_time=end_time,
+        duration_hours=dur,
+        guests_count=guests,
+        base_price=price,
+        extras_price=0,
+        discount=0,
+        total_price=price,
+        admin_note=data.get("manual_note", "Ручная бронь"),
+    )
+
+    await state.clear()
+    await message.answer(
+        f"✅ Ручная бронь #{booking_id} создана!\n\n"
+        f"👤 {data['manual_user_name']}\n"
+        f"📅 {data['manual_date']} {data['manual_time']}–{end_time}\n"
+        f"👥 {guests} чел. | 💵 {price:,}₽",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# Calendar nav for manual booking
+@router.callback_query(AdminStates.manual_choosing_date, F.data.startswith("cal_prev:"))
+async def manual_cal_prev(callback: CallbackQuery):
+    offset = int(callback.data.split(":")[1])
+    await callback.message.edit_reply_markup(reply_markup=calendar_kb(max(0, offset - 1)))
+    await callback.answer()
+
+@router.callback_query(AdminStates.manual_choosing_date, F.data.startswith("cal_next:"))
+async def manual_cal_next(callback: CallbackQuery):
+    offset = int(callback.data.split(":")[1])
+    await callback.message.edit_reply_markup(reply_markup=calendar_kb(min(offset + 1, 2)))
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  BLOCK / UNBLOCK DATES
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:dates")
+async def adm_dates_menu(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    blocked = await db.get_all_blocked_dates()
+    text = f"📅 Управление датами\n{'─' * 28}\n\n"
+
+    if blocked:
+        text += "🚫 Заблокированные даты:\n"
+        for bd in blocked:
+            reason = f" — {bd['reason']}" if bd.get("reason") else ""
+            text += f"  • {bd['blocked_date']}{reason}\n"
+    else:
+        text += "Нет заблокированных дат ✅\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Заблокировать дату", callback_data="adm:block_date")],
+        [InlineKeyboardButton(text="🔓 Разблокировать дату", callback_data="adm:unblock_date")],
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
 
 @router.callback_query(F.data == "adm:block_date")
 async def adm_block_date(callback: CallbackQuery, state: FSMContext):
@@ -182,13 +413,44 @@ async def adm_block_reason_text(message: Message, state: FSMContext):
     )
 
 
-# Calendar nav for admin
+@router.callback_query(F.data == "adm:unblock_date")
+async def adm_unblock_date(callback: CallbackQuery, state: FSMContext):
+    blocked = await db.get_all_blocked_dates()
+    if not blocked:
+        await callback.answer("Нет заблокированных дат", show_alert=True)
+        return
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for bd in blocked:
+        reason = f" ({bd['reason']})" if bd.get("reason") else ""
+        rows.append([InlineKeyboardButton(
+            text=f"🔓 {bd['blocked_date']}{reason}",
+            callback_data=f"adm_unblock:{bd['blocked_date']}"
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:dates")])
+
+    await callback.message.edit_text(
+        "🔓 Выбери дату для разблокировки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_unblock:"))
+async def adm_unblock_confirm(callback: CallbackQuery):
+    date_str = callback.data.split(":", 1)[1]
+    await db.unblock_date(date_str)
+    await callback.answer(f"✅ {date_str} разблокирована", show_alert=True)
+    await adm_dates_menu(callback)
+
+
+# Calendar nav for block
 @router.callback_query(AdminStates.blocking_date, F.data.startswith("cal_prev:"))
 async def adm_cal_prev(callback: CallbackQuery):
     offset = int(callback.data.split(":")[1])
     await callback.message.edit_reply_markup(reply_markup=calendar_kb(max(0, offset - 1)))
     await callback.answer()
-
 
 @router.callback_query(AdminStates.blocking_date, F.data.startswith("cal_next:"))
 async def adm_cal_next(callback: CallbackQuery):
@@ -197,7 +459,9 @@ async def adm_cal_next(callback: CallbackQuery):
     await callback.answer()
 
 
-# ─── Stats ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  STATISTICS — ENHANCED
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:stats")
 async def adm_stats(callback: CallbackQuery):
@@ -210,15 +474,21 @@ async def adm_stats(callback: CallbackQuery):
     text = (
         f"📊 Статистика\n"
         f"{'─' * 28}\n\n"
-        f"👥 Пользователей: {stats['total_users']}\n"
+        f"👥 Пользователей: {stats['total_users']} (новых за неделю: +{stats['new_users_week']})\n"
+        f"🔄 Повторных клиентов: {stats['repeat_users']}\n"
         f"📋 Активных броней: {stats['active_bookings']}\n"
         f"✅ Завершённых: {stats['completed_bookings']}\n"
         f"📌 Сегодня: {stats['today_bookings']}\n"
-        f"🚷 Неявок: {stats['noshows']}\n\n"
-        f"💰 Доход:\n"
+        f"🚷 Неявок: {stats['noshows']}\n"
+        f"❌ Отмен: {stats['cancellations']}\n\n"
+        f"💰 Выручка:\n"
         f"  За всё время: {stats['total_revenue']:,}₽\n"
+        f"  За 7 дней: {stats['week_revenue']:,}₽\n"
         f"  За 30 дней: {stats['month_revenue']:,}₽\n"
         f"  Средний чек: {stats['avg_check']:,}₽\n\n"
+        f"📈 Средние показатели:\n"
+        f"  Гостей/бронь: {stats['avg_guests']}\n"
+        f"  Часов/бронь: {stats['avg_duration']}\n\n"
         f"⭐ Рейтинг: {stats['avg_rating']}/5 ({stats['reviews_count']} отзывов)\n\n"
     )
 
@@ -234,13 +504,321 @@ async def adm_stats(callback: CallbackQuery):
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")]
+        [InlineKeyboardButton(text="📊 Загрузка по часам", callback_data="adm:occupancy")],
+        [InlineKeyboardButton(text="💰 Выручка по дням", callback_data="adm:revenue")],
+        [InlineKeyboardButton(text="⭐ Все отзывы", callback_data="adm:reviews")],
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
-# ─── Blacklist ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  REVENUE BY DAY
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:revenue")
+async def adm_revenue(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    days_data = await db.get_revenue_by_day(14)
+
+    text = f"💰 Выручка по дням (14 дней)\n{'─' * 28}\n\n"
+    total = 0
+    if days_data:
+        for d in days_data:
+            total += d["revenue"]
+            text += f"  {d['booking_date']}: {d['bookings']} бр. | 👥 {d['guests']} | 💵 {d['revenue']:,}₽\n"
+        text += f"\n💰 Итого: {total:,}₽"
+        text += f"\n📈 В среднем/день: {total // len(days_data):,}₽"
+    else:
+        text += "Нет данных за период"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К статистике", callback_data="adm:stats")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  REVIEWS
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:reviews")
+async def adm_reviews(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    reviews = await db.get_all_reviews(20)
+    avg, cnt = await db.get_average_rating()
+
+    text = f"⭐ Отзывы ({cnt} всего, средний: {avg}/5)\n{'─' * 28}\n\n"
+
+    if reviews:
+        for r in reviews:
+            stars = "⭐" * r["rating"]
+            comment = f"\n  💬 {r['comment']}" if r.get("comment") else ""
+            text += f"  {stars} — {r['full_name']} ({r['created_at'][:10]}){comment}\n\n"
+    else:
+        text += "Пока нет отзывов"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К статистике", callback_data="adm:stats")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER MANAGEMENT
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:users")
+async def adm_users_menu(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    users = await db.get_all_users_including_blocked()
+    total = len(users)
+    blocked = sum(1 for u in users if u["is_blacklisted"])
+
+    text = (
+        f"👥 Пользователи ({total} всего, {blocked} в ЧС)\n"
+        f"{'─' * 28}\n\n"
+        f"Последние зарегистрированные:\n"
+    )
+
+    for u in users[:10]:
+        bl = " ⛔" if u["is_blacklisted"] else ""
+        adm = " 🔑" if u["is_admin"] else ""
+        text += f"  • {u['full_name']}{adm}{bl} — {u['visits_count']} визитов, {u['loyalty_points']} баллов\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Поиск клиента", callback_data="adm:search_user")],
+        [InlineKeyboardButton(text="⛔ Чёрный список", callback_data="adm:blacklist")],
+        [InlineKeyboardButton(text="🔑 Управление админами", callback_data="adm:admins")],
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:search_user")
+async def adm_search_user(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🔍 Введи имя, телефон или username для поиска:"
+    )
+    await state.set_state(AdminStates.search_user)
+    await callback.answer()
+
+
+@router.message(AdminStates.search_user)
+async def adm_search_result(message: Message, state: FSMContext):
+    query = message.text.strip()
+    results = await db.search_users(query)
+    await state.clear()
+
+    if not results:
+        await message.answer(
+            f"Не найдено: «{query}»",
+            reply_markup=admin_menu_kb(),
+        )
+        return
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for u in results[:10]:
+        rows.append([InlineKeyboardButton(
+            text=f"👤 {u['full_name']} ({u['visits_count']} визитов)",
+            callback_data=f"adm_user:{u['telegram_id']}"
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")])
+
+    await message.answer(
+        f"🔍 Результаты для «{query}» ({len(results)}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("adm_user:"))
+async def adm_user_profile(callback: CallbackQuery):
+    tg_id = int(callback.data.split(":")[1])
+    user = await db.get_user(tg_id)
+    if not user:
+        await callback.answer("Не найден", show_alert=True)
+        return
+
+    bookings = await db.get_user_bookings_by_id(user["id"], limit=5)
+
+    bl = "⛔ ЗАБЛОКИРОВАН" if user["is_blacklisted"] else "✅ Активен"
+    adm = "🔑 Админ" if user["is_admin"] else ""
+    username = f"@{user['username']}" if user.get("username") else "—"
+
+    text = (
+        f"👤 Профиль клиента\n{'─' * 28}\n\n"
+        f"Имя: {user['full_name']}\n"
+        f"Telegram: {username} (ID: {user['telegram_id']})\n"
+        f"Телефон: {user.get('phone') or '—'}\n"
+        f"ДР: {user.get('birthday') or '—'}\n"
+        f"Статус: {bl} {adm}\n\n"
+        f"📊 Статистика:\n"
+        f"  🏆 Визитов: {user['visits_count']}\n"
+        f"  💎 Баллов: {user['loyalty_points']}\n"
+        f"  🚷 Неявок: {user['noshow_count']}\n"
+        f"  📅 Регистрация: {user['created_at'][:10]}\n"
+    )
+
+    if bookings:
+        text += f"\n📋 Последние брони:\n"
+        for b in bookings:
+            text += f"  #{b['id']} {b['booking_date']} {b['start_time']} — {STATUS_TEXT.get(b['status'], b['status'])}\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = [
+        [InlineKeyboardButton(text="💎 Изменить баллы", callback_data=f"adm_points:{tg_id}")],
+        [InlineKeyboardButton(text="💬 Написать клиенту", callback_data=f"adm_msg:{tg_id}")],
+    ]
+    if user["is_blacklisted"]:
+        buttons.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"adm_unban:{tg_id}")])
+    else:
+        buttons.append([InlineKeyboardButton(text="⛔ Заблокировать", callback_data=f"adm_ban:{tg_id}")])
+
+    if user["is_admin"]:
+        buttons.append([InlineKeyboardButton(text="🔑 Снять админа", callback_data=f"adm_demote:{tg_id}")])
+    else:
+        buttons.append([InlineKeyboardButton(text="🔑 Назначить админом", callback_data=f"adm_promote:{tg_id}")])
+
+    buttons.append([InlineKeyboardButton(text="◀️ К пользователям", callback_data="adm:users")])
+
+    await callback.message.edit_text(
+        text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+# ─── Points adjustment ───
+
+@router.callback_query(F.data.startswith("adm_points:"))
+async def adm_adjust_points(callback: CallbackQuery, state: FSMContext):
+    tg_id = int(callback.data.split(":")[1])
+    user = await db.get_user(tg_id)
+    await state.update_data(points_user_tg=tg_id)
+    await callback.message.edit_text(
+        f"💎 Баллы {user['full_name']}: {user['loyalty_points']}\n\n"
+        "Введи новое количество баллов (число):"
+    )
+    await state.set_state(AdminStates.adjust_points)
+    await callback.answer()
+
+
+@router.message(AdminStates.adjust_points)
+async def adm_set_points(message: Message, state: FSMContext):
+    try:
+        points = int(message.text.strip())
+        if points < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи положительное число:")
+        return
+
+    data = await state.get_data()
+    tg_id = data["points_user_tg"]
+    await db.set_loyalty_points(tg_id, points)
+    user = await db.get_user(tg_id)
+    await state.clear()
+    await message.answer(
+        f"✅ Баллы {user['full_name']} обновлены: {points}",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# ─── Message user ───
+
+@router.callback_query(F.data.startswith("adm_msg:"))
+async def adm_message_user(callback: CallbackQuery, state: FSMContext):
+    tg_id = int(callback.data.split(":")[1])
+    user = await db.get_user(tg_id)
+    await state.update_data(msg_user_tg=tg_id, msg_user_name=user["full_name"])
+    await callback.message.edit_text(
+        f"💬 Сообщение для {user['full_name']}\n\nВведи текст:"
+    )
+    await state.set_state(AdminStates.message_user)
+    await callback.answer()
+
+
+@router.message(AdminStates.message_user)
+async def adm_send_message(message: Message, state: FSMContext):
+    data = await state.get_data()
+    tg_id = data["msg_user_tg"]
+    try:
+        await message.bot.send_message(
+            tg_id,
+            f"💬 Сообщение от администрации Scorpion Platinum:\n\n{message.text}"
+        )
+        await message.answer(f"✅ Сообщение отправлено {data['msg_user_name']}", reply_markup=admin_menu_kb())
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить: {e}", reply_markup=admin_menu_kb())
+    await state.clear()
+
+
+# ─── Ban / Unban ───
+
+@router.callback_query(F.data.startswith("adm_ban:"))
+async def adm_ban(callback: CallbackQuery):
+    tg_id = int(callback.data.split(":")[1])
+    await db.blacklist_user(tg_id)
+    await callback.answer("⛔ Заблокирован", show_alert=True)
+    await adm_user_profile(callback.__class__(
+        id=callback.id, chat_instance=callback.chat_instance,
+        data=f"adm_user:{tg_id}", message=callback.message, from_user=callback.from_user
+    ))
+
+
+@router.callback_query(F.data.startswith("adm_unban:"))
+async def adm_unban(callback: CallbackQuery):
+    tg_id = int(callback.data.split(":")[1])
+    await db.unblacklist_user(tg_id)
+    await callback.answer("✅ Разблокирован", show_alert=True)
+    # Refresh profile
+    user = await db.get_user(tg_id)
+    if user:
+        callback.data = f"adm_user:{tg_id}"
+        await adm_user_profile(callback)
+
+
+# ─── Promote / Demote admin ───
+
+@router.callback_query(F.data.startswith("adm_promote:"))
+async def adm_promote(callback: CallbackQuery):
+    tg_id = int(callback.data.split(":")[1])
+    await db.set_admin(tg_id)
+    await callback.answer("🔑 Назначен админом", show_alert=True)
+    callback.data = f"adm_user:{tg_id}"
+    await adm_user_profile(callback)
+
+
+@router.callback_query(F.data.startswith("adm_demote:"))
+async def adm_demote(callback: CallbackQuery):
+    tg_id = int(callback.data.split(":")[1])
+    await db.remove_admin(tg_id)
+    if tg_id in ADMIN_IDS:
+        ADMIN_IDS.remove(tg_id)
+    await callback.answer("Админ снят", show_alert=True)
+    callback.data = f"adm_user:{tg_id}"
+    await adm_user_profile(callback)
+
+
+# ═══════════════════════════════════════════════════════════
+#  BLACKLIST
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:blacklist")
 async def adm_blacklist(callback: CallbackQuery, state: FSMContext):
@@ -250,8 +828,6 @@ async def adm_blacklist(callback: CallbackQuery, state: FSMContext):
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    all_users = await db.get_all_users()
-    # Get blacklisted separately
     db_conn = await db.get_db()
     try:
         cur = await db_conn.execute("SELECT * FROM users WHERE is_blacklisted = 1")
@@ -266,26 +842,17 @@ async def adm_blacklist(callback: CallbackQuery, state: FSMContext):
         for u in blacklisted:
             text += f"  • {u['full_name']} (неявок: {u['noshow_count']})\n"
             rows.append([InlineKeyboardButton(
-                text=f"🔓 Разблокировать {u['full_name']}",
+                text=f"🔓 {u['full_name']}",
                 callback_data=f"adm_unban:{u['telegram_id']}"
             )])
     else:
         text += "Пусто ✅"
 
     rows.append([InlineKeyboardButton(text="➕ Добавить в ЧС", callback_data="adm:add_blacklist")])
-    rows.append([InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")])
+    rows.append([InlineKeyboardButton(text="◀️ К пользователям", callback_data="adm:users")])
 
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
-
-
-@router.callback_query(F.data.startswith("adm_unban:"))
-async def adm_unban(callback: CallbackQuery):
-    tg_id = int(callback.data.split(":")[1])
-    await db.unblacklist_user(tg_id)
-    await callback.answer("✅ Пользователь разблокирован", show_alert=True)
-    # Refresh the blacklist view
-    await adm_blacklist(callback, None)
 
 
 @router.callback_query(F.data == "adm:add_blacklist")
@@ -307,7 +874,7 @@ async def adm_add_blacklist_id(message: Message, state: FSMContext):
 
     user = await db.get_user(tg_id)
     if not user:
-        await message.answer("Пользователь не найден в базе.")
+        await message.answer("Пользователь не найден в базе.", reply_markup=admin_menu_kb())
         await state.clear()
         return
 
@@ -319,7 +886,69 @@ async def adm_add_blacklist_id(message: Message, state: FSMContext):
     )
 
 
-# ─── Promo broadcast ────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  ADMIN ROLES
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:admins")
+async def adm_admins_list(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    admins = await db.get_admins()
+    text = f"🔑 Администраторы ({len(admins)})\n{'─' * 28}\n\n"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for a in admins:
+        username = f"@{a['username']}" if a.get("username") else ""
+        text += f"  • {a['full_name']} {username}\n"
+        rows.append([InlineKeyboardButton(
+            text=f"👤 {a['full_name']}",
+            callback_data=f"adm_user:{a['telegram_id']}"
+        )])
+
+    rows.append([InlineKeyboardButton(text="➕ Добавить админа", callback_data="adm:add_admin")])
+    rows.append([InlineKeyboardButton(text="◀️ К пользователям", callback_data="adm:users")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:add_admin")
+async def adm_add_admin(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введи Telegram ID нового админа:")
+    await state.set_state(AdminStates.adding_admin)
+    await callback.answer()
+
+
+@router.message(AdminStates.adding_admin)
+async def adm_add_admin_id(message: Message, state: FSMContext):
+    try:
+        tg_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введи числовой Telegram ID:")
+        return
+
+    user = await db.get_user(tg_id)
+    if not user:
+        await message.answer("Пользователь не найден. Он должен сначала написать /start боту.",
+                             reply_markup=admin_menu_kb())
+        await state.clear()
+        return
+
+    await db.set_admin(tg_id)
+    await state.clear()
+    await message.answer(
+        f"🔑 {user['full_name']} назначен админом.",
+        reply_markup=admin_menu_kb(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+#  BROADCAST
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:promo")
 async def adm_promo(callback: CallbackQuery, state: FSMContext):
@@ -327,9 +956,10 @@ async def adm_promo(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⛔", show_alert=True)
         return
 
+    users = await db.get_all_users()
     await callback.message.edit_text(
-        "📢 Рассылка\n\n"
-        "Напиши текст сообщения для всех пользователей:"
+        f"📢 Рассылка ({len(users)} получателей)\n\n"
+        "Напиши текст сообщения:"
     )
     await state.set_state(AdminStates.sending_promo)
     await callback.answer()
@@ -365,7 +995,9 @@ async def adm_send_promo(message: Message, state: FSMContext):
     )
 
 
-# ─── Complete booking ────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  COMPLETE / NO-SHOW
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "adm:complete")
 async def adm_complete(callback: CallbackQuery):
@@ -408,13 +1040,11 @@ async def adm_confirm_complete(callback: CallbackQuery):
 
     await db.update_booking_status(booking_id, "completed")
 
-    # Award loyalty
     user = await db.get_user_by_id(booking["user_id"])
     if user:
         visits = await db.increment_visits(user["telegram_id"])
         await db.add_loyalty_points(user["telegram_id"], LOYALTY_VISIT_POINTS)
 
-        # Notify user
         try:
             msg = f"✅ Визит завершён! Спасибо за посещение Scorpion Platinum!\n\n"
             msg += f"🏆 Визит #{visits} | +{LOYALTY_VISIT_POINTS} баллов"
@@ -433,8 +1063,6 @@ async def adm_confirm_complete(callback: CallbackQuery):
     )
     await callback.answer()
 
-
-# ─── No-show ─────────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:noshow")
 async def adm_noshow(callback: CallbackQuery):
@@ -487,7 +1115,28 @@ async def adm_confirm_noshow(callback: CallbackQuery):
     await callback.answer()
 
 
-# ─── View booking from admin ─────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#  EXPORT CSV
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:export")
+async def adm_export(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    csv_data = await db.export_bookings_csv(90)
+    file = BufferedInputFile(
+        csv_data.encode("utf-8-sig"),
+        filename=f"scorpion_bookings_{date.today().isoformat()}.csv",
+    )
+    await callback.message.answer_document(file, caption="📊 Экспорт бронирований за 90 дней")
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+#  VIEW BOOKING FROM ADMIN
+# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("adm_view:"))
 async def adm_view_booking(callback: CallbackQuery):
@@ -509,9 +1158,12 @@ async def adm_view_booking(callback: CallbackQuery):
         f"📅 {booking['booking_date']}\n"
         f"⏰ {booking['start_time']} — {booking['end_time']} ({booking['duration_hours']}ч)\n"
         f"👥 {booking['guests_count']} чел.\n"
-        f"💵 {booking['total_price']}₽\n"
-        f"📌 Статус: {booking['status']}\n"
+        f"💵 {booking['total_price']:,}₽\n"
+        f"📌 {STATUS_TEXT.get(booking['status'], booking['status'])}\n"
     )
+
+    if booking.get("admin_note"):
+        text += f"📝 Заметка: {booking['admin_note']}\n"
 
     if booking.get("extras"):
         text += "\n🛒 Допы:\n"
@@ -519,8 +1171,67 @@ async def adm_view_booking(callback: CallbackQuery):
             text += f"  • {ext['item_name']} — {ext['price']}₽\n"
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    if booking["status"] in ("confirmed", "pending"):
+        buttons.append([
+            InlineKeyboardButton(text="✅ Завершить", callback_data=f"adm_complete:{booking_id}"),
+            InlineKeyboardButton(text="🚷 Неявка", callback_data=f"adm_noshow:{booking_id}"),
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"adm_cancel:{booking_id}"),
+        ])
+    if user:
+        buttons.append([
+            InlineKeyboardButton(text=f"👤 Профиль {user_name}", callback_data=f"adm_user:{user['telegram_id']}"),
+        ])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:today")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_cancel:"))
+async def adm_cancel_booking(callback: CallbackQuery):
+    booking_id = int(callback.data.split(":")[1])
+    success = await db.cancel_booking(booking_id)
+    if success:
+        await callback.answer("❌ Бронь отменена", show_alert=True)
+    else:
+        await callback.answer("Не удалось отменить", show_alert=True)
+    # Return to today
+    await adm_today(callback)
+
+
+# ═══════════════════════════════════════════════════════════
+#  SETTINGS
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "adm:settings")
+async def adm_settings(callback: CallbackQuery):
+    if not await _check_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+
+    from config import (
+        PRICE_PER_HOUR, PRICE_FULL_DAY, WORK_HOURS_START, WORK_HOURS_END,
+        MAX_CAPACITY, MIN_BOOKING_HOURS, VENUE_ADDRESS, VENUE_PHONE,
+    )
+
+    text = (
+        f"⚙️ Настройки\n{'─' * 28}\n\n"
+        f"💰 Цена/час: {PRICE_PER_HOUR:,}₽\n"
+        f"🌟 Сутки: {PRICE_FULL_DAY:,}₽\n"
+        f"⏰ Часы работы: {WORK_HOURS_START}:00 — {WORK_HOURS_END:02d}:00\n"
+        f"👥 Макс. гостей: {MAX_CAPACITY}\n"
+        f"⏳ Мин. бронь: {MIN_BOOKING_HOURS} ч.\n"
+        f"📍 Адрес: {VENUE_ADDRESS}\n"
+        f"📱 Телефон: {VENUE_PHONE}\n\n"
+        f"⚠️ Для изменения настроек напиши администратору системы."
+    )
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:today")]
+        [InlineKeyboardButton(text="◀️ Админ-меню", callback_data="adm:menu")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()

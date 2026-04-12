@@ -36,3 +36,28 @@ class AdminStates(StatesGroup):
     blocking_date = State()
     blocking_reason = State()
     adding_to_blacklist = State()
+    # Manual booking
+    manual_choosing_user = State()
+    manual_choosing_date = State()
+    manual_choosing_time = State()
+    manual_choosing_duration = State()
+    manual_choosing_guests = State()
+    manual_note = State()
+    # Edit booking
+    edit_choosing_field = State()
+    edit_new_value = State()
+    # User management
+    search_user = State()
+    adjust_points = State()
+    message_user = State()
+    # Admin roles
+    adding_admin = State()
+    # Settings
+    setting_price = State()
+    setting_hours_start = State()
+    setting_hours_end = State()
+    setting_capacity = State()
+    # Unblock date
+    unblock_choosing_date = State()
+    # Export
+    export_choosing_period = State()
