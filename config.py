@@ -12,7 +12,7 @@ ADMIN_IDS: list[int] = []
 VENUE_NAME = "Scorpion Platinum"
 VENUE_ADDRESS = "г. Нальчик, ул. Шарданова, 7"
 VENUE_PHONE = "+7 (928) 709-30-62"
-VENUE_INSTAGRAM = "@scorpion.nalchik"
+VENUE_INSTAGRAM = "@scorpion.platinum"
 VENUE_DESCRIPTION = (
     "Премиум-лаунж с PlayStation 3, PlayStation 5 Pro, кальяном и доставкой еды.\n"
     "Одна большая приватная комната — идеально для компании."
