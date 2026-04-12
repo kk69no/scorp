@@ -8,10 +8,11 @@ from aiogram.types import Message, CallbackQuery
 from keyboards import showcase_kb, main_menu_kb
 from config import (
     VENUE_NAME, VENUE_ADDRESS, VENUE_PHONE, VENUE_INSTAGRAM,
-    VENUE_DESCRIPTION, PRICE_PER_HOUR, PRICE_PER_HOUR_WEEKDAY_DISCOUNT,
-    WORK_HOURS_START, WORK_HOURS_END,
-    EXTRAS_HOOKAH, EXTRAS_DRINKS, EXTRAS_FOOD,
-    PS5_GAMES, MAX_CAPACITY,
+    VENUE_DESCRIPTION, PRICE_PER_HOUR, PRICE_FULL_DAY,
+    WORK_HOURS_START, WORK_HOURS_END, MIN_BOOKING_HOURS,
+    EXTRAS_HOOKAH,
+    PS5_GAMES, MAX_CAPACITY, CONSOLES, DELIVERY_NOTE,
+    VENUE_LATITUDE, VENUE_LONGITUDE,
 )
 
 router = Router()
@@ -19,6 +20,7 @@ router = Router()
 
 @router.message(F.text == "ℹ️ О нас")
 async def about_us(message: Message):
+    consoles_text = ", ".join(CONSOLES)
     text = (
         f"🏠 {VENUE_NAME}\n"
         f"{'─' * 28}\n\n"
@@ -28,6 +30,7 @@ async def about_us(message: Message):
         f"📸 Instagram: {VENUE_INSTAGRAM}\n\n"
         f"🕐 Режим работы:\n"
         f"  Ежедневно {WORK_HOURS_START}:00 — {WORK_HOURS_END:02d}:00\n\n"
+        f"🎮 Консоли: {consoles_text}\n"
         f"👥 Вместимость: до {MAX_CAPACITY} человек\n\n"
         f"Выбери раздел для подробностей 👇"
     )
@@ -42,23 +45,21 @@ async def show_price(callback: CallbackQuery):
         f"💰 Прайс-лист {VENUE_NAME}\n"
         f"{'─' * 28}\n\n"
         f"🏠 Аренда комнаты:\n"
-        f"  • Стандарт: {PRICE_PER_HOUR}₽/час\n"
-        f"  • Пн–Чт до 17:00: {PRICE_PER_HOUR_WEEKDAY_DISCOUNT}₽/час\n\n"
-        f"🔥 Кальян:\n"
+        f"  • {PRICE_PER_HOUR:,}₽ / час\n"
+        f"  • 🌟 Сутки — {PRICE_FULL_DAY:,}₽\n"
+        f"  • Минимум: {MIN_BOOKING_HOURS} часа\n\n"
     )
-    for name, price in EXTRAS_HOOKAH.items():
-        text += f"  • {name}: {price}₽\n"
 
-    text += f"\n🥤 Напитки:\n"
-    for name, price in EXTRAS_DRINKS.items():
-        text += f"  • {name}: {price}₽\n"
-
-    text += f"\n🍕 Еда:\n"
-    for name, price in EXTRAS_FOOD.items():
-        text += f"  • {name}: {price}₽\n"
+    if EXTRAS_HOOKAH:
+        text += "🔥 Кальян:\n"
+        for name, price in EXTRAS_HOOKAH.items():
+            text += f"  • {name}: {price}₽\n"
+        text += "\n"
 
     text += (
-        f"\n💡 Скидки:\n"
+        f"🍕 Еда и напитки:\n"
+        f"  {DELIVERY_NOTE}\n\n"
+        f"💡 Скидки:\n"
         f"  • Каждый 5-й визит — час бесплатно\n"
         f"  • День рождения — скидка 20%\n"
         f"  • Приведи друга — +200 бонусов\n"
@@ -68,14 +69,20 @@ async def show_price(callback: CallbackQuery):
     await callback.answer()
 
 
-# ─── PS5 Games ───────────────────────────────────────────
+# ─── Games & Consoles ────────────────────────────────────
 
 @router.callback_query(F.data == "show:games")
 async def show_games(callback: CallbackQuery):
-    text = f"🎮 Игры на PS5\n{'─' * 28}\n\n"
+    consoles_text = ", ".join(CONSOLES)
+    text = f"🎮 Консоли и игры\n{'─' * 28}\n\n"
+    text += f"🕹 Консоли: {consoles_text}\n\n"
+    text += "📀 Доступные игры:\n"
     for i, game in enumerate(PS5_GAMES, 1):
-        text += f"  {i}. {game}\n"
-    text += "\n💡 Список обновляется — спрашивай о новинках!"
+        if game.startswith("и другие"):
+            text += f"\n  🔥 {game}\n"
+        else:
+            text += f"  {i}. {game}\n"
+    text += "\n💡 Почти все популярные игры в наличии!"
 
     await callback.message.edit_text(text, reply_markup=showcase_kb())
     await callback.answer()
@@ -85,7 +92,7 @@ async def show_games(callback: CallbackQuery):
 
 @router.callback_query(F.data == "show:hookah")
 async def show_hookah(callback: CallbackQuery):
-    text = f"🔥 Меню кальянов\n{'─' * 28}\n\n"
+    text = f"🔥 Кальян\n{'─' * 28}\n\n"
     for name, price in EXTRAS_HOOKAH.items():
         text += f"  🔥 {name} — {price}₽\n"
     text += "\n💡 Кальян можно заказать заранее при бронировании!"
@@ -98,17 +105,14 @@ async def show_hookah(callback: CallbackQuery):
 
 @router.callback_query(F.data == "show:food")
 async def show_food(callback: CallbackQuery):
-    text = f"🍕 Еда и напитки\n{'─' * 28}\n\n"
-
-    text += "🥤 Напитки:\n"
-    for name, price in EXTRAS_DRINKS.items():
-        text += f"  • {name} — {price}₽\n"
-
-    text += "\n🍕 Еда:\n"
-    for name, price in EXTRAS_FOOD.items():
-        text += f"  • {name} — {price}₽\n"
-
-    text += "\n💡 Заказывай заранее — к твоему приходу всё будет готово!"
+    text = (
+        f"🍕 Еда и напитки\n"
+        f"{'─' * 28}\n\n"
+        f"📦 {DELIVERY_NOTE}\n\n"
+        f"Вы можете заказать любую еду и напитки из сервисов\n"
+        f"доставки прямо к нам в комнату.\n\n"
+        f"Администратор поможет с заказом! 🤝"
+    )
 
     await callback.message.edit_text(text, reply_markup=showcase_kb())
     await callback.answer()
@@ -122,19 +126,16 @@ async def show_location(callback: CallbackQuery):
         f"📍 Как добраться\n"
         f"{'─' * 28}\n\n"
         f"🏠 {VENUE_ADDRESS}\n\n"
-        f"Мы находимся в центре Нальчика.\n"
-        f"Ориентир: ул. Чернышевского / ул. Толстого.\n\n"
-        f"🅿️ Парковка есть\n"
+        f"Мы находимся в центре Нальчика.\n\n"
         f"📱 {VENUE_PHONE}\n"
         f"📸 {VENUE_INSTAGRAM}"
     )
 
     await callback.message.edit_text(text, reply_markup=showcase_kb())
-    # Send location pin
     try:
         await callback.message.answer_location(
-            latitude=43.49556,
-            longitude=43.598987,
+            latitude=VENUE_LATITUDE,
+            longitude=VENUE_LONGITUDE,
         )
     except Exception:
         pass

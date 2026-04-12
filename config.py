@@ -6,72 +6,58 @@ Configuration
 BOT_TOKEN = "8298303089:AAH_xkJgfmuh_fK4kvVmV8kS6lyiaD8jyj8"
 
 # ──── Админы (Telegram user IDs) ────
-# Первый пользователь /admin автоматически станет админом,
-# либо укажи ID вручную:
 ADMIN_IDS: list[int] = []
 
 # ──── Заведение ────
 VENUE_NAME = "Scorpion Platinum"
-VENUE_ADDRESS = "г. Нальчик, ул. Чернышевского, 230/178"
-VENUE_PHONE = "+7 (938) 701-97-55"
+VENUE_ADDRESS = "г. Нальчик, ул. Шарданова, 7"
+VENUE_PHONE = "+7 (928) 709-30-62"
 VENUE_INSTAGRAM = "@scorpion.nalchik"
 VENUE_DESCRIPTION = (
-    "Премиум-лаунж с PlayStation 5, кальяном и едой.\n"
+    "Премиум-лаунж с PlayStation 3, PlayStation 5 Pro, кальяном и доставкой еды.\n"
     "Одна большая приватная комната — идеально для компании."
 )
 
 # ──── Режим работы ────
-WORK_HOURS_START = 10  # с 10:00
-WORK_HOURS_END = 3     # до 03:00 (следующего дня)
-SLOT_DURATION_MINUTES = 60  # один слот = 1 час
+WORK_HOURS_START = 10
+WORK_HOURS_END = 3
+SLOT_DURATION_MINUTES = 60
 
 # ──── Комната ────
-MAX_CAPACITY = 15          # макс. гостей одновременно
+MAX_CAPACITY = 12
 MIN_GUESTS = 1
-MAX_BOOKING_HOURS = 8      # макс. длительность брони
-MIN_BOOKING_HOURS = 1
+MAX_BOOKING_HOURS = 17
+MIN_BOOKING_HOURS = 3
 
 # ──── Цены (руб.) ────
-PRICE_PER_HOUR = 1500      # аренда комнаты за час
-PRICE_PER_HOUR_WEEKDAY_DISCOUNT = 1200  # скидка пн-чт до 17:00
+PRICE_PER_HOUR = 1000
+PRICE_PER_HOUR_WEEKDAY_DISCOUNT = 1000
+PRICE_FULL_DAY = 12000
 
 # ──── Допы ────
 EXTRAS_HOOKAH = {
-    "Классика":      800,
-    "Фрукты":        1000,
-    "Премиум микс":  1200,
-    "Двойной":       1500,
+    "Аренда кальяна": 500,
 }
 
-EXTRAS_DRINKS = {
-    "Чай фирменный":       200,
-    "Лимонад фирменный":   250,
-    "Кофе":                 200,
-    "Вода / Сок":           150,
-}
+EXTRAS_DRINKS = {}
+EXTRAS_FOOD = {}
 
-EXTRAS_FOOD = {
-    "Сет закусок":       500,
-    "Пицца":             600,
-    "Бургер":            450,
-    "Наггетсы":          350,
-    "Фри":               250,
-}
+DELIVERY_NOTE = "Еду и напитки можно заказать с доставкой от наших партнёров прямо в комнату!"
 
 # ──── Лояльность ────
-LOYALTY_VISIT_POINTS = 100        # баллов за визит
-LOYALTY_REFERRAL_POINTS = 200     # баллов за приглашённого друга
-LOYALTY_POINTS_PER_RUBLE = 0.05   # 1 руб = 0.05 балла с чека
-FREE_HOUR_EVERY_N_VISITS = 5      # каждое N-е посещение — бесплатный час
-BIRTHDAY_DISCOUNT_PERCENT = 20    # скидка на ДР
+LOYALTY_VISIT_POINTS = 100
+LOYALTY_REFERRAL_POINTS = 200
+LOYALTY_POINTS_PER_RUBLE = 0.05
+FREE_HOUR_EVERY_N_VISITS = 5
+BIRTHDAY_DISCOUNT_PERCENT = 20
 
 # ──── Напоминания ────
-REMINDER_BEFORE_HOURS = 2      # напомнить за N часов до визита
-FEEDBACK_AFTER_MINUTES = 30    # запросить отзыв через N минут после окончания
+REMINDER_BEFORE_HOURS = 2
+FEEDBACK_AFTER_MINUTES = 30
 
 # ──── Предоплата ────
-PREPAYMENT_REQUIRED = False    # требовать предоплату?
-PREPAYMENT_PERCENT = 50        # процент предоплаты
+PREPAYMENT_REQUIRED = False
+PREPAYMENT_PERCENT = 50
 
 # ──── Дни недели ────
 WEEKDAYS_RU = {
@@ -79,17 +65,25 @@ WEEKDAYS_RU = {
     4: "Пт", 5: "Сб", 6: "Вс"
 }
 
-# ──── Игры PS5 ────
+# ──── Консоли и игры ────
+CONSOLES = ["PlayStation 3", "PlayStation 5 Pro"]
+
 PS5_GAMES = [
-    "FIFA 25", "GTA V", "Mortal Kombat 1", "UFC 5",
-    "Call of Duty: MW III", "It Takes Two", "Gran Turismo 7",
-    "NBA 2K25", "Tekken 8", "Spider-Man 2",
-    "God of War: Ragnarök", "Hogwarts Legacy",
-    "Overcooked! All You Can Eat", "Crash Team Rumble",
+    "FIFA 25", "GTA V", "GTA Online", "Mortal Kombat 1", "UFC 5",
+    "Call of Duty: MW III", "Call of Duty: BO6", "It Takes Two",
+    "Gran Turismo 7", "NBA 2K25", "Tekken 8", "Spider-Man 2",
+    "God of War: Ragnarok", "Hogwarts Legacy", "The Last of Us Part I",
+    "The Last of Us Part II", "Uncharted: Legacy of Thieves",
+    "Overcooked! All You Can Eat", "Astro Bot",
+    "и другие популярные игры",
 ]
 
 # ──── База данных ────
 DATABASE_PATH = "scorpion_platinum.db"
 
 # ──── No-show ────
-NOSHOW_BLACKLIST_THRESHOLD = 3  # после N неявок — в чёрный список
+NOSHOW_BLACKLIST_THRESHOLD = 3
+
+# ──── Геолокация ────
+VENUE_LATITUDE = 43.4833
+VENUE_LONGITUDE = 43.6067

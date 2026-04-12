@@ -1,6 +1,6 @@
 """
 Full booking flow:
-Date → Time → Duration → Guests → Extras → Confirmation
+Date -> Time -> Duration -> Guests -> Extras -> Confirmation
 """
 
 from datetime import date, datetime, timedelta
@@ -12,10 +12,10 @@ import database as db
 from states import BookingStates
 from config import (
     WORK_HOURS_START, WORK_HOURS_END, MAX_CAPACITY, MAX_BOOKING_HOURS,
-    PRICE_PER_HOUR, PRICE_PER_HOUR_WEEKDAY_DISCOUNT,
+    PRICE_PER_HOUR, PRICE_FULL_DAY,
     EXTRAS_HOOKAH, EXTRAS_DRINKS, EXTRAS_FOOD,
     BIRTHDAY_DISCOUNT_PERCENT, FREE_HOUR_EVERY_N_VISITS,
-    LOYALTY_VISIT_POINTS, VENUE_NAME,
+    LOYALTY_VISIT_POINTS, VENUE_NAME, DELIVERY_NOTE,
 )
 from keyboards import (
     calendar_kb, time_slots_kb, duration_kb, guests_kb,
@@ -29,7 +29,6 @@ def _get_work_hours() -> list[str]:
     """Generate list of working hour slots like ['10:00', '11:00', ..., '02:00']."""
     slots = []
     if WORK_HOURS_END <= WORK_HOURS_START:
-        # Crosses midnight: e.g., 10:00 → 03:00
         for h in range(WORK_HOURS_START, 24):
             slots.append(f"{h:02d}:00")
         for h in range(0, WORK_HOURS_END):
@@ -50,19 +49,11 @@ def _max_duration_from(start_time: str) -> int:
     return min(len(all_slots) - idx, MAX_BOOKING_HOURS)
 
 
-def _calc_price(booking_date: str, start_time: str, duration: int) -> int:
-    """Calculate base price considering weekday discount."""
-    d = date.fromisoformat(booking_date)
-    hour = int(start_time.split(":")[0])
-    is_weekday = d.weekday() < 4  # Mon-Thu
-    is_daytime = 10 <= hour < 17
-
-    if is_weekday and is_daytime:
-        price_per_h = PRICE_PER_HOUR_WEEKDAY_DISCOUNT
-    else:
-        price_per_h = PRICE_PER_HOUR
-
-    return price_per_h * duration
+def _calc_price(booking_date: str, start_time: str, duration: int, is_full_day: bool = False) -> int:
+    """Calculate base price. Full day = flat rate."""
+    if is_full_day:
+        return PRICE_FULL_DAY
+    return PRICE_PER_HOUR * duration
 
 
 # ─── Start booking ───────────────────────────────────────
@@ -78,7 +69,10 @@ async def start_booking(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    await state.update_data(selected_extras={"hookah": [], "drinks": [], "food": []})
+    await state.update_data(
+        selected_extras={"hookah": [], "drinks": [], "food": []},
+        is_full_day=False,
+    )
     await message.answer(
         "📅 Выбери дату:",
         reply_markup=calendar_kb(0),
@@ -119,6 +113,7 @@ async def quick_rebook(message: Message, state: FSMContext):
         },
         duration=last["duration_hours"],
         guests=last["guests_count"],
+        is_full_day=False,
         rebook=True,
     )
 
@@ -145,7 +140,7 @@ async def cal_prev(callback: CallbackQuery):
 @router.callback_query(BookingStates.choosing_date, F.data.startswith("cal_next:"))
 async def cal_next(callback: CallbackQuery):
     offset = int(callback.data.split(":")[1])
-    new_offset = min(offset + 1, 2)  # max 2 months ahead
+    new_offset = min(offset + 1, 2)
     await callback.message.edit_reply_markup(reply_markup=calendar_kb(new_offset))
     await callback.answer()
 
@@ -175,10 +170,8 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
 
     for slot in all_slots:
         h = int(slot.split(":")[0])
-        # For today, only future slots (+ 1 hour buffer)
         if selected == date.today():
             if h <= WORK_HOURS_START and h < WORK_HOURS_END:
-                # after-midnight slot — available if it's before that time
                 slot_dt = datetime.combine(selected + timedelta(days=1), datetime.strptime(slot, "%H:%M").time())
             else:
                 slot_dt = datetime.combine(selected, datetime.strptime(slot, "%H:%M").time())
@@ -216,7 +209,6 @@ async def back_to_date(callback: CallbackQuery, state: FSMContext):
 async def back_to_time(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     date_str = data.get("booking_date", "")
-    # Re-calculate available slots
     all_slots = _get_work_hours()
     available = []
     for slot in all_slots:
@@ -281,7 +273,6 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
 
     # Check if this is a rebook with pre-set duration
     if data.get("rebook") and data.get("duration"):
-        # Skip to guests or confirmation
         max_h = _max_duration_from(start_time)
         if data["duration"] > max_h:
             await state.update_data(duration=max_h)
@@ -292,14 +283,13 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
         if data.get("guests", 1) > max_g:
             await state.update_data(guests=max_g)
 
-        # Go straight to confirmation for rebook
         await _show_confirmation(callback, state)
         return
 
     max_h = _max_duration_from(start_time)
     await callback.message.edit_text(
         f"📅 {data['booking_date']} в {start_time}\n\n"
-        f"⏳ На сколько часов? (макс. {max_h})",
+        f"⏳ На сколько часов? (мин. 3 ч.)",
         reply_markup=duration_kb(max_h),
     )
     await state.set_state(BookingStates.choosing_duration)
@@ -308,10 +298,34 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
 
 # ─── Duration selected ───────────────────────────────────
 
+@router.callback_query(BookingStates.choosing_duration, F.data == "dur:fullday")
+async def duration_fullday(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    max_h = _max_duration_from(data["start_time"])
+    await state.update_data(duration=max_h, is_full_day=True)
+
+    max_guests = await db.get_available_capacity(
+        data["booking_date"], data["start_time"], max_h
+    )
+    max_guests = min(max_guests, MAX_CAPACITY)
+
+    if max_guests < 1:
+        await callback.answer("Нет мест на выбранное время 😔", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"📅 {data['booking_date']} — СУТКИ 🌟\n\n"
+        f"👥 Сколько гостей? (макс. {max_guests})",
+        reply_markup=guests_kb(max_guests),
+    )
+    await state.set_state(BookingStates.choosing_guests)
+    await callback.answer()
+
+
 @router.callback_query(BookingStates.choosing_duration, F.data.startswith("dur:"))
 async def duration_selected(callback: CallbackQuery, state: FSMContext):
     duration = int(callback.data.split(":")[1])
-    await state.update_data(duration=duration)
+    await state.update_data(duration=duration, is_full_day=False)
 
     data = await state.get_data()
     max_guests = await db.get_available_capacity(
@@ -340,6 +354,13 @@ async def guests_selected(callback: CallbackQuery, state: FSMContext):
     await state.update_data(guests=guests)
 
     data = await state.get_data()
+
+    # If no extras available at all, go straight to confirmation
+    has_extras = bool(EXTRAS_HOOKAH or EXTRAS_DRINKS or EXTRAS_FOOD)
+    if not has_extras:
+        await _show_confirmation(callback, state)
+        return
+
     await callback.message.edit_text(
         f"📅 {data['booking_date']} в {data['start_time']} ({data['duration']}ч) | 👥 {guests}\n\n"
         "🛒 Добавить что-нибудь к бронированию?",
@@ -405,6 +426,7 @@ async def _show_confirmation(callback: CallbackQuery, state: FSMContext):
     start_time = data["start_time"]
     duration = data["duration"]
     guests = data["guests"]
+    is_full_day = data.get("is_full_day", False)
     selected = data.get("selected_extras", {"hookah": [], "drinks": [], "food": []})
 
     # Calculate end time
@@ -413,7 +435,7 @@ async def _show_confirmation(callback: CallbackQuery, state: FSMContext):
     end_time = f"{end_h:02d}:00"
 
     # Base price
-    base_price = _calc_price(booking_date, start_time, duration)
+    base_price = _calc_price(booking_date, start_time, duration, is_full_day)
 
     # Extras price
     extras_price = 0
@@ -466,11 +488,13 @@ async def _show_confirmation(callback: CallbackQuery, state: FSMContext):
     from config import WEEKDAYS_RU
     wd = WEEKDAYS_RU[d.weekday()]
 
+    duration_label = "СУТКИ 🌟" if is_full_day else f"{duration} ч."
+
     text = (
         f"📋 Итого бронирования:\n"
         f"{'─' * 28}\n"
         f"📅 {booking_date} ({wd})\n"
-        f"⏰ {start_time} — {end_time} ({duration} ч.)\n"
+        f"⏰ {start_time} — {end_time} ({duration_label})\n"
         f"👥 Гостей: {guests}\n"
     )
 
@@ -480,16 +504,22 @@ async def _show_confirmation(callback: CallbackQuery, state: FSMContext):
             cat_emoji = {"hookah": "🔥", "drinks": "🥤", "food": "🍕"}.get(ext["category"], "•")
             text += f"  {cat_emoji} {ext['item_name']} — {ext['price']}₽\n"
 
-    text += f"\n💰 Комната: {base_price}₽\n"
+    text += f"\n💰 Комната: {base_price:,}₽"
+    if is_full_day:
+        text += " (тариф «Сутки»)"
+    text += "\n"
+
     if extras_price:
-        text += f"🛒 Допы: {extras_price}₽\n"
+        text += f"🛒 Допы: {extras_price:,}₽\n"
     if discount:
         text += f"\n🎁 Скидки:\n"
         for r in discount_reasons:
             text += f"  {r}\n"
 
     text += f"\n{'─' * 28}\n"
-    text += f"💵 Итого: {total}₽\n"
+    text += f"💵 Итого: {total:,}₽\n"
+
+    text += f"\n📦 {DELIVERY_NOTE}"
 
     await callback.message.edit_text(text, reply_markup=confirmation_kb())
     await state.set_state(BookingStates.confirmation)
@@ -520,7 +550,7 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     text = (
         f"✅ Бронь #{booking_id} подтверждена!\n\n"
         f"📅 {data['booking_date']} с {data['start_time']} до {data['end_time']}\n"
-        f"👥 {data['guests']} чел. | 💵 {data['total_price']}₽\n\n"
+        f"👥 {data['guests']} чел. | 💵 {data['total_price']:,}₽\n\n"
         f"Мы напомним за 2 часа до визита! 🔔\n"
         f"Ждём тебя в Scorpion Platinum 🔥"
     )
@@ -531,7 +561,6 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     # Notify admins
     from config import ADMIN_IDS
     admin_ids = list(ADMIN_IDS)
-    # Also get DB admins
     all_users = await db.get_all_users()
     for u in all_users:
         if u["is_admin"] and u["telegram_id"] not in admin_ids:
@@ -544,7 +573,7 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
                 f"🆕 Новая бронь #{booking_id}\n"
                 f"👤 {user['full_name']} ({user.get('phone', 'нет тел.')})\n"
                 f"📅 {data['booking_date']} {data['start_time']}–{data['end_time']}\n"
-                f"👥 {data['guests']} чел. | 💵 {data['total_price']}₽",
+                f"👥 {data['guests']} чел. | 💵 {data['total_price']:,}₽",
             )
         except Exception:
             pass

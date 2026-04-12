@@ -11,6 +11,7 @@ from aiogram.types import (
 from config import (
     WORK_HOURS_START, WORK_HOURS_END, MAX_BOOKING_HOURS, MIN_BOOKING_HOURS,
     EXTRAS_HOOKAH, EXTRAS_DRINKS, EXTRAS_FOOD, WEEKDAYS_RU,
+    PRICE_FULL_DAY,
 )
 
 
@@ -63,7 +64,6 @@ def calendar_kb(month_offset: int = 0) -> InlineKeyboardMarkup:
 
     rows = []
 
-    # Month/year header with nav arrows
     rows.append([
         InlineKeyboardButton(text="◀️", callback_data=f"cal_prev:{month_offset}"),
         InlineKeyboardButton(
@@ -73,13 +73,11 @@ def calendar_kb(month_offset: int = 0) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="▶️", callback_data=f"cal_next:{month_offset}"),
     ])
 
-    # Weekday headers
     rows.append([
         InlineKeyboardButton(text=d, callback_data="ignore")
         for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     ])
 
-    # Days grid
     import calendar
     cal = calendar.monthcalendar(first_day.year, first_day.month)
     for week in cal:
@@ -142,6 +140,15 @@ def duration_kb(max_hours: int | None = None) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
 
+    # Full day option
+    if limit >= 10:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🌟 Сутки — {PRICE_FULL_DAY:,}₽",
+                callback_data="dur:fullday"
+            )
+        ])
+
     rows.append([
         InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_time"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_booking"),
@@ -173,25 +180,29 @@ def guests_kb(max_guests: int) -> InlineKeyboardMarkup:
 
 def extras_menu_kb(selected: dict | None = None) -> InlineKeyboardMarkup:
     selected = selected or {}
-    hookah_count = len(selected.get("hookah", []))
-    drinks_count = len(selected.get("drinks", []))
-    food_count = len(selected.get("food", []))
+    rows = []
 
-    h_label = f"🔥 Кальян ({hookah_count})" if hookah_count else "🔥 Кальян"
-    d_label = f"🥤 Напитки ({drinks_count})" if drinks_count else "🥤 Напитки"
-    f_label = f"🍕 Еда ({food_count})" if food_count else "🍕 Еда"
+    if EXTRAS_HOOKAH:
+        hookah_count = len(selected.get("hookah", []))
+        h_label = f"🔥 Кальян ({hookah_count})" if hookah_count else "🔥 Кальян"
+        rows.append([InlineKeyboardButton(text=h_label, callback_data="extras:hookah")])
 
-    rows = [
-        [InlineKeyboardButton(text=h_label, callback_data="extras:hookah")],
-        [InlineKeyboardButton(text=d_label, callback_data="extras:drinks")],
-        [InlineKeyboardButton(text=f_label, callback_data="extras:food")],
-        [InlineKeyboardButton(text="✅ Готово — к итогу", callback_data="extras:done")],
-        [InlineKeyboardButton(text="⏭ Без допов", callback_data="extras:skip")],
-        [
-            InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_guests"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_booking"),
-        ],
-    ]
+    if EXTRAS_DRINKS:
+        drinks_count = len(selected.get("drinks", []))
+        d_label = f"🥤 Напитки ({drinks_count})" if drinks_count else "🥤 Напитки"
+        rows.append([InlineKeyboardButton(text=d_label, callback_data="extras:drinks")])
+
+    if EXTRAS_FOOD:
+        food_count = len(selected.get("food", []))
+        f_label = f"🍕 Еда ({food_count})" if food_count else "🍕 Еда"
+        rows.append([InlineKeyboardButton(text=f_label, callback_data="extras:food")])
+
+    rows.append([InlineKeyboardButton(text="✅ Готово — к итогу", callback_data="extras:done")])
+    rows.append([InlineKeyboardButton(text="⏭ Без допов", callback_data="extras:skip")])
+    rows.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_guests"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_booking"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -328,8 +339,8 @@ def admin_confirm_kb(action: str, booking_id: int) -> InlineKeyboardMarkup:
 def showcase_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Прайс", callback_data="show:price")],
-        [InlineKeyboardButton(text="🎮 Игры PS5", callback_data="show:games")],
-        [InlineKeyboardButton(text="🔥 Меню кальянов", callback_data="show:hookah")],
-        [InlineKeyboardButton(text="🍕 Еда и напитки", callback_data="show:food")],
+        [InlineKeyboardButton(text="🎮 Игры и консоли", callback_data="show:games")],
+        [InlineKeyboardButton(text="🔥 Кальян", callback_data="show:hookah")],
+        [InlineKeyboardButton(text="🍕 Еда и доставка", callback_data="show:food")],
         [InlineKeyboardButton(text="📍 Как добраться", callback_data="show:location")],
     ])
